@@ -1,0 +1,3 @@
+/home/greg/ClionProjects/HWMonitor/cmake-build-debug/CMakeFiles/rebuild_cache.dir
+/home/greg/ClionProjects/HWMonitor/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/greg/ClionProjects/HWMonitor/cmake-build-debug/CMakeFiles/HWMonitor.dir

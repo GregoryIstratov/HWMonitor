@@ -1,0 +1,1 @@
+/usr/bin/c++    -std=c++14 -march=native -mtune=native -O0 -g -pipe -Wall -Wpedantic -Wextra -g   CMakeFiles/HWMonitor.dir/main.cpp.o  -o HWMonitor -lblkid -lncurses 

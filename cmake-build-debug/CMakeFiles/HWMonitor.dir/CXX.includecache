@@ -1,0 +1,44 @@
+#IncludeRegexLine: ^[ 	]*#[ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/greg/ClionProjects/HWMonitor/main.cpp
+iostream
+-
+fstream
+-
+string
+-
+vector
+-
+cstring
+-
+regex
+-
+sstream
+-
+stdio.h
+-
+dirent.h
+-
+err.h
+-
+blkid/blkid.h
+-
+sys/statvfs.h
+-
+set
+-
+cmath
+-
+iomanip
+-
+thread
+-
+ncurses.h
+-
+
