@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.6)
 project(HWMonitor)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c99 -march=native -mtune=native -O0 -g -pipe -Wall -Wpedantic -Wextra")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DEFAULT_SOURCE -std=c11 -O2 -g  -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-function -Werror -pipe")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer")
+#set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=leak")
 
 set(SOURCE_FILES main.c)
 add_executable(HWMonitor ${SOURCE_FILES})
-target_link_libraries(HWMonitor blkid ncurses)
+target_link_libraries(HWMonitor blkid ncurses )
