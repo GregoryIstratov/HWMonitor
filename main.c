@@ -142,7 +142,7 @@ static int init_gloabls()
 
     //stdtest = open_memstream(&stdtest_buf, &stdtest_size);
     stdtest = fopen("/dev/null", "w");
-    stderr = stdtest;
+    //stderr = stdtest;
     //stdout = stdtest;
 
     string_init_globals();
@@ -704,7 +704,6 @@ static int ht_foreach(hashtable_t* ht, ht_forach_cb cb)
     return ST_OK;
 }
 
-
 //=======================================================================
 // DYNAMIC ALLOCATOR
 //=======================================================================
@@ -785,7 +784,7 @@ static int da_check_size(dynamic_allocator *a, size_t new_size) {
 static int da_append(dynamic_allocator *a, const char *data, size_t size) {
     da_check_size(a, size);
 
-    mcopy(a->ptr+ a->used, data, size);
+    mcopy(a->ptr + a->used, data, size);
     a->used += size;
 
     return ST_OK;
@@ -805,6 +804,15 @@ static int da_sub(dynamic_allocator* a, size_t pos, dynamic_allocator** b)
 
     return ST_OK;
 
+}
+
+static int da_dub(dynamic_allocator* a, dynamic_allocator** b)
+{
+    size_t b_size = a->used;
+    da_init_n(b, b_size);
+    da_append(*b, a->ptr, b_size);
+
+    return ST_OK;
 }
 
 static int da_merge(dynamic_allocator *a, dynamic_allocator *b) {
@@ -840,6 +848,80 @@ static int da_remove_seq(dynamic_allocator* a, size_t pos, size_t n)
 
 
 //=======================================================================
+// GENERIC VECTOR
+//=======================================================================
+typedef struct vector
+{
+    dynamic_allocator* alloc;
+    size_t size;
+    size_t elem_size;
+} vector_t;
+
+static int vector_init(vector_t** vec, size_t elem_size)
+{
+    *vec = allocz(NULL, sizeof(vector_t));
+    da_init_n(&(*vec)->alloc, elem_size * 10);
+    (*vec)->elem_size = elem_size;
+
+    return ST_OK;
+}
+
+static int vector_release(vector_t* vec)
+{
+    da_release(&vec->alloc);
+    free(vec);
+
+    return ST_OK;
+}
+
+static size_t vector_size(vector_t* vec) { return vec->size; }
+
+static int vector_add(vector_t* vec, const void* elem)
+{
+    da_append(vec->alloc, (const char*)elem, vec->elem_size);
+    vec->size++;
+
+    return ST_OK;
+}
+
+
+static int vector_get(vector_t* vec, size_t idx, void** elem)
+{
+    if(idx >= vec->size)
+        return ST_OUT_OF_RANGE;
+
+    *elem = (void*)&(vec->alloc->ptr[vec->elem_size*idx]);
+
+    return ST_OK;
+}
+
+static int vector_set(vector_t* vec, size_t idx, void* elem)
+{
+    if(idx >= vec->size)
+        return ST_OUT_OF_RANGE;
+
+    void* el = (void*)&(vec->alloc->ptr[vec->elem_size*idx]);
+
+    memcpy(el, elem, vec->elem_size);
+
+    return ST_OK;
+
+}
+
+typedef void(*vector_foreach_cb)(size_t,size_t, void*, void*);
+
+static void vector_foreach(vector_t* vec, void* ctx, vector_foreach_cb cb)
+{
+    size_t n = vec->size;
+    for(size_t i = 0; i < n; ++i)
+    {
+        void* v = (void*)&(vec->alloc->ptr[vec->elem_size*i]);
+        cb(i, vec->elem_size, ctx, v);
+    }
+}
+
+
+//=======================================================================
 // STRING
 //=======================================================================
 
@@ -848,6 +930,12 @@ typedef struct {
     size_t size;
     uint64_t nt;
 } string;
+
+typedef struct skey_value
+{
+    string* key;
+    string* value;
+} skey_value_t;
 
 static string* string_null = NULL;
 
@@ -872,6 +960,16 @@ static int string_release(string** s)
     return ST_OK;
 }
 
+static int string_dub(string* s, string** ns)
+{
+    *ns = allocz(NULL, sizeof(string));
+    da_dub(s->alloc, &(*ns)->alloc);
+
+    (*ns)->size = s->size;
+    (*ns)->nt = s->nt;
+
+    return ST_OK;
+}
 
 static int string_append(string *s, const char *str) {
     size_t len = strlen(str);
@@ -991,6 +1089,14 @@ static int string_compare(string* a, string* b)
     if(memcmp(a->alloc->ptr, b->alloc->ptr, a->size) == 0)
         return ST_OK;
 
+
+    return ST_NOT_FOUND;
+}
+
+static int string_comparez(string* a, const char* cmp)
+{
+    if(strncmp(a->alloc->ptr, cmp, strlen(cmp)) == 0)
+        return ST_OK;
 
     return ST_NOT_FOUND;
 }
@@ -1339,6 +1445,12 @@ static int string_strip(string* s) {
     return ST_OK;
 }
 
+//===========================================================================================
+// BlkTable
+//===========================================================================================
+
+
+
 
 static int test_slist()
 {
@@ -1637,17 +1749,21 @@ static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     if (!(fpipe = popen(cmd, "r")))
         return ST_ERR;
 
-//    char line[1024] = {0};
+    char line[1024] = {0};
 
 
-//    string output;
-//    while (fgets(buff, sizeof(buff), fpipe)) {
-//        string s
-//        cb(line, ctx);
-//    }
-//
-//    cb(&output, ctx);
-//
+    slist* sl;
+    slist_init(&sl);
+
+    while (fgets(line, sizeof(line), fpipe)) {
+        string* s = NULL;
+
+        string_createz(&s, line);
+        slist_append(sl, s);
+    }
+
+    cb(sl, ctx);
+
     pclose(fpipe);
 
     return ST_OK;
@@ -1761,9 +1877,9 @@ enum
     BLK_LAST
 };
 
-typedef struct {
-    void* p;
-} LsblkSignle;
+typedef struct sblkid {
+    hashtable_t* blk;
+} sblkid_t;
 
 typedef struct
 {
@@ -1792,30 +1908,128 @@ static int sm_token(char ch)
 
 #define FSM_CALLBACK(x) ((size_t)&x)
 
+
+typedef struct system
+{
+    hashtable_t* blk;
+} system_t;
+
+
+static int system_init(system_t** sys)
+{
+    *sys = allocz(NULL, sizeof(system_t));
+    ht_init(&(*sys)->blk);
+
+    return ST_OK;
+}
+
+static int vector_add_kv(vector_t* vec, string* key, string* val)
+{
+    skey_value_t* kv = allocz(NULL, sizeof(skey_value_t));
+    string_dub(key, &kv->key);
+    string_dub(val, &kv->value);
+
+    vector_add(vec, kv);
+
+    return ST_OK;
+}
+
+static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
+{
+
+    ht_key_t* hkey = NULL;
+    uint64_t hash = crc64s(0, (uint8_t*)key->alloc->ptr, key->size);
+    ht_create_key_i(hash, &hkey);
+
+    ht_value_t* val = NULL;
+    ht_create_value(vec, sizeof(vector_t), &val);
+
+    ht_set(ht, hkey, val);
+
+    return ST_OK;
+}
+
+
+
+
 static void sblk_callback(slist* lines, void *ctx) {
 
-//    printf(source);
-//
-//    string stat[BLK_LAST];
-//
-//    kv_pair m[BLK_LAST];
-//    memset(m, 0, sizeof(m));
-//
-//
-//
-//    for(size_t i =0, j = 0; i < EXECUTE_LINE_BUFFER; ++i, ++j)
-//    {
-//        m[j].ne = &source[i];
-//        const char ch = source[i];
-//        int tok = sm_token(ch);
-//
-//
-//    }
+    sblkid_t* sys = (sblkid_t*)ctx;
+    ht_init(&sys->blk);
 
+    fprintf(stdout, "------- LINES OF TOKENS -----------\n");
+    slist_fprint(lines, stdout);
+    fflush(stdout);
+
+    string* tk = NULL;
+    slist_init_current(lines);
+    while((tk = slist_next(lines)) != NULL) {
+
+        fprintf(stdout, "------- TOKEN LINE-----------\n");
+        string_fprint(tk, stdout);
+
+        fprintf(stdout, "------- TOKEN SPLIT-----------\n");
+
+        slist* tokens = NULL;
+        string_split(tk,' ',&tokens);
+
+        slist_fprint(tokens, stdout);
+
+        slist_init_current(tokens);
+
+        //==============================
+        // vector pair init
+
+        vector_t* vec = NULL;
+        vector_init(&vec, sizeof(skey_value_t));
+
+        //==============================
+
+
+        string *s = NULL;
+        string* sname = NULL;
+        while ((s = slist_next(tokens)) != NULL) {
+
+            slist *kv = NULL;
+            string_split(s, '=', &kv);
+
+            fprintf(stdout, "------- TOKEN KEY-VALUE -----------\n");
+            slist_fprint(kv, stdout);
+
+
+            slist_init_current(kv);
+            string* key = slist_next(kv);
+            string *val = slist_next(kv);
+
+            string_strip(val);
+
+            if(string_comparez(key,"NAME") == ST_OK)
+                string_dub(val, &sname);
+
+            fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
+
+            //add kv
+            vector_add_kv(vec, key, val);
+
+            string_fprint(key, stdout);
+            string_fprint(val, stdout);
+
+            slist_release(&kv, true);
+        }
+
+
+        //add to ht, not need to free
+        ht_set_s(sys->blk, sname, vec);
+
+        string_release(&sname);
+
+        slist_release(&tokens, true);
+
+    }
 
 }
 
-static int sblk_execute(LsblkSignle *sblk, const char *dev) {
+static int sblk_execute(sblkid_t *sblk) {
     static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
 
     string* cmd = NULL;
@@ -1829,8 +2043,7 @@ static int sblk_execute(LsblkSignle *sblk, const char *dev) {
         string_append(cmd, options[i]);
     }
 
-    string_append(cmd, " ");
-    string_appendz(cmd, dev);
+    string_appendz(cmd, "");
 
 
     char *ccmd = NULL;
@@ -1842,6 +2055,498 @@ static int sblk_execute(LsblkSignle *sblk, const char *dev) {
 }
 
 
+typedef struct device {
+    string* name;
+    //struct statvfs stats;
+    //std::vector <uint64_t> stat;
+    string* perf_read;
+    string* perf_write;
+    string* label;
+    uint64_t size;
+    uint64_t used;
+    uint64_t avail;
+    double perc;
+    string* fsize;
+    string* fuse;
+    string* fs;
+    string* mount;
+    string* sysfolder;
+    string* model;
+    uint64_t child;
+    vector_t childs;
+} device_t;
+
+//static int read_all_file(const char* path) {
+//    FILE* f;
+//
+//    if(!(f = fopen(path, "r"))
+//        return ST_ERR;
+//
+//
+//
+//
+//    fclose(f);
+//
+//    return ST_OK;
+//}
+//
+//static std::vector<std::string> scan_dir(std::string basedir, std::regex re) {
+//    dirent *dir = nullptr;
+//    DIR *d = opendir(basedir.c_str());
+//
+//    std::vector<std::string> v;
+//    if (d) {
+//        while ((dir = readdir(d)) != NULL) {
+//            if (std::regex_match(dir->d_name, re)) {
+//                std::stringstream ss;
+//                ss << basedir << "/" << std::string(dir->d_name);
+//                v.push_back(ss.str());
+//            }
+//        }
+//
+//        closedir(d);
+//    }
+//
+//    return v;
+//}
+
+
+
+//std::string hr_size(uint64_t bytes) {
+//
+//    double r = bytes / 1024.;
+//    if (r < 1024)  // KB / sec
+//        return tostring((uint64_t) r) + "Kb";
+//
+//    r = bytes / 1024 / 1024;
+//    if (r < 1024)  // MiB / sec
+//        return tostring((uint64_t) r) + "Mb";
+//
+//    r = bytes / 1024 / 1024 / 1024;
+//    return tostring((uint64_t) r) + "Gb";
+//}
+
+//
+//class DeviceManager {
+//    std::vector<device_ptr> base_devs;
+//public:
+//    void detect() {
+//        std::regex re1("^s.*$");
+//        auto vdev = scan_dir("/sys/block", re1);
+//
+//        base_devs.resize(vdev.size());
+//
+//        for (auto &dev : base_devs)
+//            dev = std::make_shared<Device>();
+//
+//        for (size_t i = 0; i < vdev.size(); ++i) {
+//            auto pos = vdev[i].find_last_of('/');
+//            auto devn = vdev[i].substr(pos + 1);
+//
+//
+//            base_devs[i]->sysfolder = vdev[i];
+//            base_devs[i]->name = devn;
+//            base_devs[i]->child = false;
+//
+//            auto childsv = scan_dir(base_devs[i]->sysfolder, std::regex(base_devs[i]->name + "[1-9]+$"));
+//
+//            for (size_t j = 0; j < childsv.size(); ++j) {
+//                device_ptr child = std::make_shared<Device>();
+//                child->sysfolder = childsv[j];
+//                auto cpos = childsv[j].find_last_of('/');
+//                auto cdevn = childsv[j].substr(cpos + 1);
+//                child->name = cdevn;
+//                child->child = true;
+//
+//                base_devs[i]->childs.push_back(child);
+//            }
+//
+//
+//        }
+//    }
+//
+//    void enrich_devs() {
+//        for (auto dev : base_devs) {
+//            for (auto cdev : dev->childs) {
+//                enrich(cdev);
+//            }
+//
+//            enrich(dev);
+//
+//
+//        }
+//    }
+//
+//    std::vector<device_ptr> devs() {
+//        return base_devs;
+//    }
+//
+//private:
+//
+//    device_ptr get_dev_by_name(device_ptr base, const std::string &name) {
+//        if (base->name == name)
+//            return base;
+//        else if (base->childs.size() > 0) {
+//            for (size_t i = 0; i < base->childs.size(); ++i) {
+//                if (get_dev_by_name(base->childs[i], name))
+//                    return base->childs[i];
+//            }
+//        }
+//
+//        return nullptr;
+//    }
+//
+//    int enrich(device_ptr dev) {
+//        enrich_dev_stat(dev);
+//        enrich_etc(dev);
+//        enrich_size(dev);
+//
+//        return ST_OK;
+//    }
+//
+//    int enrich_etc(device_ptr dev) {
+//        sblkid_t blk;
+//        blk.exec("/dev/" + dev->name);
+//        dev->fs = blk.stat("FSTYPE");
+//        dev->model = blk.stat("MODEL");
+//        dev->mount = blk.stat("MOUNTPOINT");
+//        dev->uuid = blk.stat("UUID");
+//        dev->label = blk.stat("LABEL");
+//
+//        if (!dev->child) {
+//            dev->size = std::stoull(blk.stat("SIZE"));
+//            //dev->fsize = hr_size(dev->size);
+//        }
+//
+//        return ST_OK;
+//    }
+//
+//    int enrich_size(device_ptr dev) {
+//        DfSingle df;
+//        df.exec("/dev/" + dev->name);
+//
+//        if (dev->child) {
+//            dev->size = df.total();
+//            dev->used = df.used();
+//            dev->avail = df.avail();
+//            dev->perc = dev->used / (double) dev->size * 100.0;
+//        } else {
+//            for (auto ch : dev->childs) {
+//                dev->used += ch->used;
+//            }
+//
+//
+//            dev->perc = dev->used / (double) dev->size * 100.0;
+//        }
+//
+//
+//        auto hr_used = hr_size(dev->used);
+//        auto hr_total = hr_size(dev->size);
+//        auto hr_use = f2s(dev->perc, 2);
+//
+//        std::stringstream ss;
+//        ss << hr_used << "/" << hr_total;
+//
+//        dev->fuse = tostring(hr_use) + "%";
+//
+//        dev->fsize = ss.str();
+//
+//        return ST_OK;
+//    }
+//
+//    int enrich_dev_stat(device_ptr dev) {
+//        auto filename = dev->sysfolder + "/stat";
+//        auto data = read_all_file(filename);
+//
+//        data = data.substr(0, data.find_last_of('\n'));
+//
+//        std::regex re("([0-9]+)");
+//
+//        std::vector<uint64_t> v;
+//        for (auto it = std::sregex_iterator(data.begin(), data.end(), re);
+//             it != std::sregex_iterator(); ++it) {
+//            std::smatch m = *it;
+//            uint64_t i = std::stoull(m.str());
+//            v.push_back(i);
+//
+//        }
+//
+//        dev->stat = std::move(v);
+//
+//        return ST_OK;
+//    }
+//};
+//
+//class PerfMeter {
+//
+//    uint32_t sample_size_;
+//    const size_t BLOCK_SIZE = 512; // Unix block size
+//public:
+//    PerfMeter(uint32_t sample_size)
+//            : sample_size_(sample_size) {
+//    }
+//
+//    uint32_t sample_size() const { return sample_size_; }
+//
+//    std::vector<device_ptr> measure() {
+//        DeviceManager dm1;
+//        dm1.detect();
+//        dm1.enrich_devs();
+//
+//        std::this_thread::sleep_for(std::chrono::seconds(sample_size_));
+//
+//        DeviceManager dm2;
+//        dm2.detect();
+//        dm2.enrich_devs();
+//
+//        std::vector<device_ptr> devs1 = dm1.devs();
+//        std::vector<device_ptr> devs2 = dm2.devs();
+//
+//        if (devs1.size() != devs2.size())
+//            std::cerr << "Integrity of devices is corrupted" << std::endl;
+//
+//        std::vector<device_ptr> devs3;
+//        devs3.resize(devs2.size());
+//        for (size_t i = 0; i < devs2.size(); ++i) {
+//            devs3[i] = diff(devs1[i], devs2[i]);
+//        }
+//
+//        return devs3;
+//    }
+//
+//
+//private:
+//    std::string human_readable(uint64_t bytes) {
+//
+//        float r = bytes / 1024.f / sample_size_;
+//        if (r < 1024)  // KB / sec
+//            return f2s(r, 3) + " Kb/s";
+//
+//        r = bytes / 1024 / 1024 / sample_size_;
+//        if (r < 1024)  // MiB / sec
+//            return f2s(r, 3) + " Mb/s";
+//
+//        r = bytes / 1024 / 1024 / 1024 / sample_size_;
+//        return f2s(r, 3) + " Gb/s";
+//    }
+//
+//    inline device_ptr diff(device_ptr a, device_ptr b) {
+//        auto c = b->deepcopy();
+//        c->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
+//        c->stat[READ_SECTORS] = b->stat[READ_SECTORS] - a->stat[READ_SECTORS];
+//        c->perf["READ"] = human_readable(c->stat[READ_SECTORS] * BLOCK_SIZE);
+//        c->perf["WRITE"] = human_readable(c->stat[WRITE_SECTORS] * BLOCK_SIZE);
+//
+//        for (size_t i = 0; i < b->childs.size(); ++i) {
+//            auto cdev = c->childs[i];
+//            auto adev = a->childs[i];
+//            cdev->stat[WRITE_SECTORS] = cdev->stat[WRITE_SECTORS] - adev->stat[WRITE_SECTORS];
+//            cdev->stat[READ_SECTORS] = cdev->stat[READ_SECTORS] - adev->stat[READ_SECTORS];
+//            cdev->perf["READ"] = human_readable(cdev->stat[READ_SECTORS] * BLOCK_SIZE);
+//            cdev->perf["WRITE"] = human_readable(cdev->stat[WRITE_SECTORS] * BLOCK_SIZE);
+//
+//        }
+//
+//        return c;
+//
+//    }
+//};
+//
+//static int statfs_dev() {
+//    const char *dev = "/usr/bin/gcc";
+//    struct statvfs64 fs;
+//
+//    int res = statvfs64(dev, &fs);
+//
+//    const uint64_t total = fs.f_blocks * fs.f_frsize;
+//    const uint64_t available = fs.f_bfree * fs.f_frsize;
+//    const uint64_t used = total - available;
+//    const double usedPercentage = ceil(used / total * 100.0);
+//
+//
+//    std::cout << dev << " " << std::fixed << total << " " << used << " " << available << " " << usedPercentage << "%"
+//              << std::endl;
+//
+//    return 0;
+//}
+//
+//
+//struct Colon {
+//    static const int OFFSET = 1;
+//    static const int DEVICE = OFFSET;
+//    static const int READ = 9 + OFFSET;
+//    static const int WRITE = 22 + OFFSET;
+//    static const int SIZE = 35 + OFFSET;
+//    static const int USE = 50 + OFFSET;
+//    static const int FILESYSTEM = 58 + OFFSET;
+//    static const int MOUNT = 64 + OFFSET;
+//    static const int MODEL = 80 + OFFSET;
+//};
+//
+//class Row {
+//    int row = 4;
+//
+//public:
+//    int operator++(int) {
+//        return row++;
+//    }
+//
+//    int operator++() {
+//        return ++row;
+//    }
+//
+//    operator int() {
+//        return row;
+//    }
+//};
+//
+//int ncurses_windows() {
+//    int mrow = 0, mcol = 0;
+//    initscr();            /* Start curses mode 		  */
+//
+//    if (has_colors() == FALSE) {
+//        endwin();
+//        printf("Your terminal does not support color\n");
+//        exit(1);
+//    }
+//
+//    //noecho();
+//    //cbreak();
+//    start_color();
+//
+//    init_pair(1, COLOR_WHITE, COLOR_BLACK);
+//    init_pair(2, COLOR_GREEN, COLOR_BLACK);
+//    init_pair(3, COLOR_CYAN, COLOR_BLACK);
+//
+//    getmaxyx(stdscr, mrow, mcol);
+//
+//    while (1) {
+//        Row row;
+//
+//        PerfMeter pm(1);
+//
+//        auto devs = pm.measure();
+//        clear();
+//
+//        attron(A_BOLD);
+//        attron(COLOR_PAIR(1));
+//
+//        mvaddstr(1, 1, "HWMonitor 0.1a\n");
+//
+//        std::stringstream ssize;
+//        ssize << "Sample size " << pm.sample_size() << "\n\n";
+//        mvaddstr(2, 1, ssize.str().c_str());
+//
+//
+//        mvaddstr(row, Colon::DEVICE, "Device");
+//        mvaddstr(row, Colon::READ, "Read");
+//        mvaddstr(row, Colon::WRITE, "Write");
+//        mvaddstr(row, Colon::SIZE, "Size");
+//        mvaddstr(row, Colon::USE, "Use");
+//        mvaddstr(row, Colon::FILESYSTEM, "FS");
+//        mvaddstr(row, Colon::MOUNT, "Mount");
+//        mvaddstr(row++, Colon::MODEL, "Model");
+//        attroff(COLOR_PAIR(1));
+//
+//
+//        for (auto dev : devs) {
+//            attron(COLOR_PAIR(2));
+//
+//            mvaddstr(row, Colon::DEVICE, dev->name.c_str());
+//            mvaddstr(row, Colon::READ, dev->perf["READ"].c_str());
+//            mvaddstr(row, Colon::WRITE, dev->perf["WRITE"].c_str());
+//            mvaddstr(row, Colon::SIZE, dev->fsize.c_str());
+//            mvaddstr(row, Colon::USE, dev->fuse.c_str());
+//            mvaddstr(row, Colon::FILESYSTEM, dev->fs.c_str());
+//            mvaddstr(row, Colon::MOUNT, dev->mount.c_str());
+//            mvaddstr(row++, Colon::MODEL, dev->model.c_str());
+//
+//            attroff(COLOR_PAIR(2));
+//            attron(COLOR_PAIR(3));
+//            for (auto child : dev->childs) {
+//                mvaddstr(row, Colon::DEVICE, child->name.c_str());
+//                mvaddstr(row, Colon::READ, child->perf["READ"].c_str());
+//                mvaddstr(row, Colon::WRITE, child->perf["WRITE"].c_str());
+//                mvaddstr(row, Colon::SIZE, child->fsize.c_str());
+//                mvaddstr(row, Colon::USE, child->fuse.c_str());
+//                mvaddstr(row, Colon::FILESYSTEM, child->fs.c_str());
+//                mvaddstr(row++, Colon::MOUNT, child->mount.c_str());
+//            }
+//
+//            attroff(COLOR_PAIR(3));
+//        }
+//
+//        attroff(A_BOLD);
+//
+//        refresh();            /* Print it on to the real screen */
+//    }
+//
+//    getch();
+//    endwin();
+//}
+//
+//
+//enum class PoArg {
+//    NO_NCURSES,
+//    DEBUG,
+//    NET
+//};
+//
+//
+//std::map<PoArg, std::string> po_arg_parse(int argc, char **argv) {
+//    std::map<PoArg, std::string> opts;
+//
+//    std::regex re("([tdn])");
+//    std::string args;
+//    for (int i = 1; i < argc; ++i)
+//        args += std::string(argv[i]) + " ";
+//
+//    for (auto it = std::sregex_iterator(args.begin(), args.end(), re);
+//         it != std::sregex_iterator();
+//         ++it) {
+//        std::smatch m = *it;
+//        if (m.str() == "t") opts[PoArg::NO_NCURSES] = "";
+//        if (m.str() == "d") opts[PoArg::DEBUG] = "";
+//        if (m.str() == "n") opts[PoArg::NET] = "";
+//    }
+//
+//    return opts;
+//}
+//
+//int text_windows() {
+//    for(;;) {
+//        PerfMeter pm(1);
+//
+//        auto devs = pm.measure();
+//
+//
+//        for (auto dev : devs) {
+//
+//            std::cout << dev->name << "\t" <<
+//                      dev->perf["READ"] << "\t" <<
+//                      dev->perf["WRITE"] << "\t" <<
+//                      dev->fsize << '\t' <<
+//                      dev->fuse << '\t' <<
+//                      dev->fs << '\t' <<
+//                      dev->mount << '\t' <<
+//                      dev->model << std::endl;
+//
+//            for (auto child : dev->childs) {
+//
+//                std::cout << child->name << "\t" <<
+//                          child->perf["READ"] << "\t" <<
+//                          child->perf["WRITE"] << "\t" <<
+//                          child->fsize << '\t' <<
+//                          child->fuse << '\t' <<
+//                          child->fs << '\t' <<
+//                          child->mount << '\t' <<
+//                          child->model << std::endl;
+//            }
+//
+//        }
+//
+//    }
+//}
 
 struct A
 {
@@ -1860,6 +2565,24 @@ void scan_alloc(uint64_t hash, ht_key_t* key, ht_value_t* val)
 {
     fprintf(stderr,"[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t)val->ptr, val->size);
     total_leak += val->size;
+    key->i = hash;
+}
+
+
+void scan_blk(uint64_t hash, ht_key_t* key, ht_value_t* val)
+{
+    vector_t* vec = (vector_t*)val->ptr;
+
+    size_t sz = vector_size(vec);
+
+    for(size_t i =0; i < sz; ++i)
+    {
+        skey_value_t* kv = NULL;
+        vector_get(vec, i, (void**)&kv);
+        fprintf(stderr,"[scan_blk][0x%08lx] %s=%s\n", hash, kv->key->alloc->ptr, kv->value->alloc->ptr);
+    }
+
+
     key->i = hash;
 }
 
@@ -1902,13 +2625,16 @@ int main() {
 //    dfs_execute(&dfs, "/dev/sdb1");
 
 //
-    LsblkSignle blk;
-    sblk_execute(&blk, "/dev/sdb1");
+
+    sblkid_t blk;
+    sblk_execute(&blk);
+
+    ht_foreach(blk.blk, &scan_blk);
 
 
-    ht_foreach(alloc_table, &scan_alloc);
+    //ht_foreach(alloc_table, &scan_alloc);
 
-    fprintf(stderr, "Total leaked: %lu bytes\n", total_leak);
+    //fprintf(stderr, "Total leaked: %lu bytes\n", total_leak);
 
     globals_shutdown();
 
