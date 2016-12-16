@@ -128,6 +128,9 @@ static int ht_create_value(void* p, size_t size, ht_value_t** value)
 
 static hashtable_t* alloc_table = NULL;
 
+struct _IO_FILE * stdout_orig;
+struct _IO_FILE * stderr_orig;
+struct _IO_FILE * stdtrace;
 static FILE* stdtest;
 //static char* stdtest_buf;
 //static size_t stdtest_size;
@@ -138,17 +141,33 @@ static void string_init_globals();
 
 static int init_gloabls()
 {
+    stdout_orig = stdout;
+    stderr_orig = stderr;
+
     ht_init(&alloc_table);
 
     //stdtest = open_memstream(&stdtest_buf, &stdtest_size);
     stdtest = fopen("/dev/null", "w");
-    //stderr = stdtest;
-    //stdout = stdtest;
+    stdtrace = fopen("/dev/null", "w");
 
     string_init_globals();
 
     return 0;
 }
+
+
+static void enable_stdout(bool b)
+{
+    if(b) stdout = stdout_orig;
+    else stdout = stdtest;
+}
+
+static void enable_stderr(bool b)
+{
+    if(b) stderr = stderr_orig;
+    else stderr = stdtest;
+}
+
 
 static int globals_shutdown()
 {
@@ -169,8 +188,6 @@ typedef struct
     uint64_t ref;
     uint64_t size;
 } object_t;
-
-static const uint64_t object_alive_value = 0x2121AABBCCDDEEFFUL;
 
 static void* object_create(size_t size)
 {
@@ -303,7 +320,7 @@ static void safe_free(void** pp)
             _record_alloc_set(p, 0);
 
             if(stat->size > 0) {
-                fprintf(stderr, "[safe_free] found address: 0x%08lx size: %lu\n", (uint64_t) (uint64_t *) p,
+                fprintf(stdtrace, "[safe_free] found address: 0x%08lx size: %lu\n", (uint64_t) (uint64_t *) p,
                         stat->size);
 
                 free(p);
@@ -328,7 +345,7 @@ static void* allocz(void* dst, size_t size)
         alloc_stat_t *stat = NULL;
 
         if (_record_alloc_get(dst, &stat) == ST_OK) {
-            fprintf(stderr, "[allocz] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
+            fprintf(stdtrace, "[allocz] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
                     stat->size, asize);
 
             if (asize > stat->size) {
@@ -365,7 +382,7 @@ static void* alloc_zstrict(void* dst, size_t size)
         alloc_stat_t *stat = NULL;
 
         if (_record_alloc_get(dst, &stat) == ST_OK) {
-            fprintf(stderr, "[alloc_zstrict] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
+            fprintf(stdtrace, "[alloc_zstrict] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
                     stat->size, asize);
 
             if (asize > stat->size) {
@@ -838,7 +855,7 @@ static int da_remove_seq(dynamic_allocator* a, size_t pos, size_t n)
 
     da_sub(a, pos-n, &b);
 
-    da_crop_tail(b, n);
+    da_crop_tail(b, n-1);
 
     da_merge(a, b);
 
@@ -1009,9 +1026,9 @@ static int string_appendn(string *s, const char *str, size_t len) {
 }
 
 static int string_appendnz(string *s, const char *str, size_t len) {
-    s->size += len + 1;
+    s->size += len;
     s->nt = true;
-    da_append(s->alloc, str, len + 1);
+    da_append(s->alloc, str, len);
     da_append(s->alloc, "\0", 1);
 
     return ST_OK;
@@ -1081,6 +1098,18 @@ static size_t string_find_last_char(string* s, char ch)
 
 }
 
+static int string_starts_withz(string* s, const char* str)
+{
+    size_t str_len = strlen(str);
+    if(str_len > s->size)
+        return ST_SIZE_EXCEED;
+
+    if(memcmp(s->alloc->ptr, str, str_len) == 0)
+        return ST_OK;
+
+    return ST_NOT_FOUND;
+}
+
 static int string_compare(string* a, string* b)
 {
     if(a->size != b->size)
@@ -1113,6 +1142,20 @@ static void string_map_region(string* s, size_t beg, size_t end, char** sb, char
 static void string_map_string(string* s, char** sb, char** se)
 {
     string_map_region(s, 0, s->size, sb, se);
+}
+
+static int string_to_u64(string* s, uint64_t* ul)
+{
+
+    uint64_t res = 0;
+
+    for (size_t i = 0; i < s->size; ++i)
+        res = res * 10 + string_get_ch(s, i) - '0';
+
+    *ul = res;
+
+    return ST_OK;
+
 }
 
 static void string_fprint(string *a, FILE* output) {
@@ -1347,7 +1390,7 @@ static int string_remove_dubseq(string* s, char delm)
 
 
         if(n > 1) {
-            string_remove_seq(s, j+i-1, n);
+            string_remove_seq(s, j+i, n);
             j = 0; // skip due to internal buffer changed
         }
 
@@ -1384,7 +1427,7 @@ static int string_split(string* s, char delm, slist** sl)
 
             string* ss = NULL;
             string_init(&ss);
-            string_appendnz(ss, cb, (size_t)(ccur-cb-1));
+            string_appendnz(ss, cb, (size_t)(ccur-cb));
 
             slist_append(*sl, ss);
 
@@ -1439,17 +1482,15 @@ static int string_lstrip(string* s)
 }
 
 static int string_strip(string* s) {
+
+    if(s->size < 3)
+        return ST_SIZE_EXCEED;
+
     string_rstrip(s);
     string_lstrip(s);
 
     return ST_OK;
 }
-
-//===========================================================================================
-// BlkTable
-//===========================================================================================
-
-
 
 
 static int test_slist()
@@ -1621,16 +1662,6 @@ static int test_slist()
 
 }
 
-//======================================================================
-
-static uint64_t str2ull(const char *str, size_t size) {
-    uint64_t res = 0;
-
-    for (size_t i = 0; i < size; ++i)
-        res = res * 10 + str[i] - '0';
-
-    return res;
-}
 
 //========================================================================
 
@@ -1699,7 +1730,7 @@ static size_t get_sfile_size(const char* filename) {
     return (size_t) st.st_size;
 }
 
-typedef void(*cmd_exec_cb)(slist*, void *);
+typedef void(*cmd_exec_cb)(void *, slist*);
 
 static void sfile_mmap(const char* filename, string* s)
 {
@@ -1762,7 +1793,7 @@ static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
         slist_append(sl, s);
     }
 
-    cb(sl, ctx);
+    cb(ctx, sl);
 
     pclose(fpipe);
 
@@ -1778,90 +1809,140 @@ enum {
 
 };
 
+
+typedef struct df_stat
+{
+    string* dev;
+
+    uint64_t total;
+    uint64_t used;
+    uint64_t avail;
+    uint64_t use;
+
+
+} df_stat_t;
+
 typedef struct {
-    uint64_t stat[4];
-    int skip_first;
-} DfSingle;
+    hashtable_t* stats;
+    uint64_t skip_first;
+} df_t;
 
 
-static void dfs_init(DfSingle *dfs) {
-    memset(dfs, 0, sizeof(DfSingle));
-    dfs->skip_first = 1;
+static void df_init(df_t** df) {
+    *df = allocz(NULL, sizeof(df_t));
+    (*df)->stats = allocz(NULL, sizeof(hashtable_t));
+    (*df)->skip_first = 1;
 }
 
-static void dfs_callback(slist* lines, void *ctx) {
-    DfSingle *dfs = (DfSingle *) ctx;
+static int ht_set_df(hashtable_t* ht, string* key, df_stat_t* stat)
+{
 
-    if (dfs->skip_first) {
-        dfs->skip_first = 0;
-        return;
+    ht_key_t* hkey = NULL;
+    uint64_t hash = crc64s(0, (uint8_t*)key->alloc->ptr, key->size);
+    ht_create_key_i(hash, &hkey);
+
+    ht_value_t* val = NULL;
+    ht_create_value(stat, sizeof(df_stat_t), &val);
+
+    ht_set(ht, hkey, val);
+
+    return ST_OK;
+}
+
+static void df_callback(void *ctx, slist* lines)
+{
+    df_t* df = (df_t*)ctx;
+
+    fprintf(stdout, "------- LINES OF TOKENS -----------\n");
+    slist_fprint(lines, stdout);
+    fflush(stdout);
+
+    string* tk = NULL;
+    slist_init_current(lines);
+    while((tk = slist_next(lines)) != NULL) {
+
+        if(string_starts_withz(tk, "/dev/") != ST_OK)
+            continue;
+
+        fprintf(stdout, "------- TOKEN LINE-----------\n");
+        string_fprint(tk, stdout);
+
+        fprintf(stdout, "------- TOKEN SPLIT-----------\n");
+
+        slist* tokens = NULL;
+        string_split(tk,' ',&tokens);
+
+        slist_fprint(tokens, stdout);
+
+        slist_init_current(tokens);
+
+        //==============================
+        // init df_stat
+
+        df_stat_t* stat = allocz(NULL, sizeof(df_stat_t));
+
+
+        //==============================
+
+
+        string *s = NULL;
+        string* sname = NULL;
+        uint64_t k = 0;
+        while ((s = slist_next(tokens)) != NULL) {
+
+            string_strip(s);
+
+            switch(k) {
+                case 0:
+                    string_dub(s, &sname);
+                    string_dub(s, &stat->dev);
+                    break;
+                case 1:
+                    string_to_u64(s, &stat->total);
+                    break;
+                case 2:
+                    string_to_u64(s, &stat->used);
+                    break;
+                case 3:
+                    string_to_u64(s, &stat->avail);
+                    break;
+                case 4: {
+                    string_pop_head(s);
+                    string_to_u64(s, &stat->use);
+                    break;
+                }
+
+                default:
+                    break;
+            }
+
+            ++k;
+
+        }
+
+
+        //add to ht, not need to free
+        ht_set_df(df->stats, sname, stat);
+
+        string_release(&sname);
+
+        slist_release(&tokens, true);
+
     }
 
-    regex_t re;
-    int reti = regcomp(&re, "([/a-zA-Z1-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)%\\s*([/a-zA-Z1-9-]*)",
-                       REG_EXTENDED);
-    if (reti) {
-        fprintf(stderr, "Could not compile regex\n");
-        exit(EXIT_FAILURE);
-    }
-
-    //printf(&source[0]);
-
-//    static const size_t MAX_MATHCHES = 7;
-//    static const size_t MAX_GROUPS = 7;
-//
-//    size_t nmatch = MAX_MATHCHES;
-//    regmatch_t pmatch[MAX_GROUPS];
-//    int rc;
-//
-//    if (0 != (rc = regexec(&re, source, nmatch, pmatch, 0))) {
-//        printf("Failed to match '%s',returning %d.\n", source, rc);
-//        exit(EXIT_FAILURE);
-//    } else {
-//
-//        size_t j = 0;
-//        //skip dev name and mount point
-//        for (size_t i = 2; i < MAX_GROUPS - 1; ++i, ++j) {
-//
-//            size_t msize = (size_t) (pmatch[i].rm_eo - pmatch[i].rm_so);
-//            const char *vals = &source[pmatch[i].rm_so];
-//
-//            dfs->stat[j] = str2ull(vals, msize);
-//
-////
-////            printf("With the whole expression, "
-////                           "a matched substring \"%.*s\" is found at position %d to %d.\n",
-////                   pmatch[i].rm_eo - pmatch[i].rm_so, &source[pmatch[i].rm_so],
-////                   pmatch[i].rm_so, pmatch[i].rm_eo - 1);
-//
-//        }
-//    }
-//
-
-    regfree(&re);
 
 }
 
-static void dfs_execute(DfSingle *dfs, const char *dev) {
+static void df_execute(df_t* dfs) {
 
     string* s;
-    string_create(&s, "df --block-size=1");
-    string_append(s, " ");
-    string_appendz(s, dev);
+    string_createz(&s, "df --block-size=1");
 
     char *cmd = NULL;
     char* cmd_end;
     string_map_string(s, &cmd, &cmd_end);
-    cmd_execute(cmd, dfs, &dfs_callback);
+    cmd_execute(cmd, dfs, &df_callback);
 }
-
-static uint64_t dfs_total(DfSingle *dfs) { return dfs->stat[DFS_TOTAL]; }
-
-static uint64_t dfs_used(DfSingle *dfs) { return dfs->stat[DFS_USED]; }
-
-static uint64_t dfs_avail(DfSingle *dfs) { return dfs->stat[DFS_AVAIL]; }
-
-static uint64_t dfs_use(DfSingle *dfs) { return dfs->stat[DFS_USE]; }
 
 
 enum
@@ -1952,7 +2033,7 @@ static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
 
 
 
-static void sblk_callback(slist* lines, void *ctx) {
+static void sblk_callback(void *ctx, slist* lines) {
 
     sblkid_t* sys = (sblkid_t*)ctx;
     ht_init(&sys->blk);
@@ -2222,7 +2303,7 @@ typedef struct device {
 //    }
 //
 //    int enrich_size(device_ptr dev) {
-//        DfSingle df;
+//        df_t df;
 //        df.exec("/dev/" + dev->name);
 //
 //        if (dev->child) {
@@ -2586,10 +2667,27 @@ void scan_blk(uint64_t hash, ht_key_t* key, ht_value_t* val)
     key->i = hash;
 }
 
+
+
+void scan_df(uint64_t hash, ht_key_t* key, ht_value_t* val)
+{
+    df_stat_t* stat = (df_stat_t*)val->ptr;
+
+
+    fprintf(stderr,"[scan_df][0x%08lx][%s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash, stat->dev->alloc->ptr,
+                                                    stat->total, stat->used, stat->avail, stat->use);
+
+
+
+    key->i = hash;
+}
+
 int main() {
 
     init_gloabls();
 
+    enable_stdout(true);
+    enable_stderr(true);
 
     //test_slist();
 
@@ -2620,11 +2718,12 @@ int main() {
 
 
 
-//    DfSingle dfs;
-//
-//    dfs_execute(&dfs, "/dev/sdb1");
+    df_t* df;
+    df_init(&df);
+    df_execute(df);
+    ht_foreach(df->stats, &scan_df);
 
-//
+
 
     sblkid_t blk;
     sblk_execute(&blk);
