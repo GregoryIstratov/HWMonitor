@@ -31,6 +31,8 @@
 #include <bits/mman.h>
 
 
+#define PTR_TO_U64(ptr) (uint64_t)(uint64_t*)ptr
+
 #define EXIT_ERROR(msg) { fprintf(stderr, "%s:%d: %s",  __FILE__, __LINE__, msg); exit(EXIT_FAILURE); }
 //#define ASSERT(x) { if(!(#x)) { fprintf(stderr, "%s:%d [%s]: assertion failed [%s]",  __FILE__, __LINE__, __PRETTY_FUNCTION__, #x); exit(EXIT_FAILURE); }}
 //#define EXIT_IF_NULL(x) if(!(#x)) { fprintf(stderr, "%s:%d [%s]: returns NULL pointer",  __FILE__, __LINE__, __PRETTY_FUNCTION__); exit(EXIT_FAILURE); }
@@ -57,27 +59,74 @@ enum {
     ST_UNKNOWN
 };
 
-struct ht_item_t
+//======================================================================================================================
+//
+//======================================================================================================================
+
+typedef struct ht_key
 {
-    char* name;
-    char* value;
+    union
+    {
+        char s[8];
+        uint64_t i;
+
+    };
+} ht_key_t;
+
+typedef struct ht_value
+{
+    void* ptr;
+    size_t size;
+} ht_value_t;
+
+typedef struct _ht_item_t
+{
+    ht_key_t*   key;
+    ht_value_t* value;
     uint64_t hash;
-    struct ht_item_t* next;
-};
+    struct _ht_item_t* next;
+} ht_item_t;
 
-struct hashtable_t
+typedef struct _hashtable_t
 {
-    struct ht_item_t* table[HASHTABLE_SIZE];
-};
+    ht_item_t* table[HASHTABLE_SIZE];
+} hashtable_t;
 
-typedef struct
+static int ht_init(hashtable_t** ht);
+
+static void ht_destroy(hashtable_t* ht);
+
+static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value);
+static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value);
+
+
+typedef void(*ht_forach_cb)(uint64_t, ht_key_t*, ht_value_t*);
+
+static int ht_foreach(hashtable_t* ht, ht_forach_cb cb);
+
+static int ht_create_key_i(uint64_t keyval, ht_key_t** key)
 {
-    uint64_t size;
-    uint64_t hash;
+    *key = malloc(sizeof(ht_key_t));
+    (*key)->i = keyval;
 
-} alloc_stat;
+    return ST_OK;
+}
 
-static struct hashtable_t* alloc_table = NULL;
+static int ht_create_value(void* p, size_t size, ht_value_t** value)
+{
+    *value = malloc(sizeof(ht_value_t));
+    (*value)->ptr = p;
+    (*value)->size = size;
+
+    return ST_OK;
+}
+
+
+//======================================================================================================================
+//======================================================================================================================
+
+
+static hashtable_t* alloc_table = NULL;
 
 static FILE* stdtest;
 //static char* stdtest_buf;
@@ -87,43 +136,158 @@ static const size_t size_npos = (size_t)-1;
 
 static void string_init_globals();
 
-static uint64_t crc64(uint64_t i);
-
-static int ht_init(struct hashtable_t** ht);
-
-static int ht_set(struct hashtable_t* ht, uint64_t i, char* value);
-
-static int ht_get(struct hashtable_t* ht, uint64_t i, char** value);
-
-static void ht_destroy(struct hashtable_t* ht);
-
 static int init_gloabls()
 {
     ht_init(&alloc_table);
+
     //stdtest = open_memstream(&stdtest_buf, &stdtest_size);
     stdtest = fopen("/dev/null", "w");
     stderr = stdtest;
-    stdout = stdtest;
+    //stdout = stdtest;
 
     string_init_globals();
 
     return 0;
 }
 
+static int globals_shutdown()
+{
+    ht_destroy(alloc_table);
+    fclose(stdtest);
+
+    return ST_OK;
+}
+
+
+//======================================================================================================================
+// blob operations
+//======================================================================================================================
+
+typedef struct
+{
+    uint64_t id;
+    uint64_t ref;
+    uint64_t size;
+} object_t;
+
+static const uint64_t object_alive_value = 0x2121AABBCCDDEEFFUL;
+
+static void* object_create(size_t size)
+{
+    size_t csize = size+sizeof(object_t);
+    char* ptr = malloc(csize);
+    object_t b;
+    b.id = (uint64_t)ptr;
+    b.ref = 1;
+    b.size = size;
+
+    memcpy(ptr, &b, sizeof(object_t));
+
+
+    // registration
+    ht_key_t * key = NULL;
+    ht_create_key_i((uint64_t)ptr, &key);
+
+    ht_value_t* val = NULL;
+    ht_create_value(ptr, csize, &val);
+
+    ht_set(alloc_table, key, val);
+    //-------------
+
+    return ptr+sizeof(object_t);
+}
+
+static void* object_share(void* a, size_t obj_size)
+{
+    object_t* b = (object_t *) ((char*)a - obj_size);
+    //atomic_fetch_add(&b->ref, 1);
+    b->ref++;
+    return a;
+}
+
+static void* object_copy(void* a, size_t obj_size)
+{
+    object_t* c = (object_t *) ((char*)a - obj_size);
+
+    size_t csize = c->size+sizeof(object_t);
+    uint64_t* ptr = malloc(csize);
+    object_t b;
+    b.id = (uint64_t)ptr;
+    b.ref = 1;
+    b.size = c->size;
+
+    memcpy(ptr, &b, sizeof(object_t));
+
+    // registration
+    ht_key_t * key = NULL;
+    ht_create_key_i((uint64_t)ptr, &key);
+
+    ht_value_t* val = NULL;
+    ht_create_value(ptr, csize, &val);
+
+    ht_set(alloc_table, key, val);
+    //-------------
+
+    return ptr+sizeof(object_t);
+}
+
+static void object_release(void* a, size_t obj_size)
+{
+    object_t* c = (object_t *) ((char*)a - obj_size);
+
+    if(c->ref > 0)
+    {
+        //atomic_fetch_add(&c->ref, -1);
+        c->ref--;
+    }
+}
+
+#define OBJECT_DECLARE() uint64_t __alive;
+#define OBJECT_INIT(x) x->__alive = object_alive_value;
+#define OBJECT_CREATE(type) (type*)(object_create(sizeof(type)));
+#define OBJECT_SHARE(x, type) (type*)object_share(x, sizeof(type));
+#define OBJECT_COPY(x, type) (type*)object_copy(x)
+#define OBJECT_RELEASE(x, type) object_release(x, sizeof(type))
+
 //===============================================================
 // ALLOCATORS
 //===============================================================
 
+typedef struct alloc_stat
+{
+    uint64_t size;
+} alloc_stat_t;
+
 static void _record_alloc_set(void* ptr, size_t size)
 {
-    alloc_stat* stat = malloc(sizeof(alloc_stat));
+    alloc_stat_t* stat = malloc(sizeof(alloc_stat_t));
     stat->size = size;
-    ht_set(alloc_table, (uint64_t)(uint64_t*)ptr, (char*)stat);
+
+    ht_key_t* key = NULL;
+    ht_create_key_i((uint64_t)(uint64_t*)ptr, &key);
+
+    ht_value_t* val = NULL;
+    ht_create_value(stat, sizeof(struct alloc_stat), &val);
+
+
+    ht_set(alloc_table, key, val);
 }
 
-static int _record_alloc_get(void* ptr, alloc_stat** stat)
+static int _record_alloc_get(void* ptr, alloc_stat_t** stat)
 {
-    return ht_get(alloc_table, (uint64_t)(uint64_t*)ptr, (char**)stat);
+    ht_value_t* val = NULL;
+    ht_key_t* key = calloc(sizeof(ht_key_t), 1);
+    key->i = PTR_TO_U64(ptr);
+    int res = ht_get(alloc_table, key, &val);
+    free(key);
+    if(res != ST_OK)
+        return res;
+
+
+    *stat = malloc(val->size);
+    memcpy(*stat, val->ptr, val->size);
+
+    return ST_OK;
 }
 
 static void safe_free(void** pp)
@@ -132,7 +296,7 @@ static void safe_free(void** pp)
     {
         void* p = *pp;
 
-        alloc_stat *stat = NULL;
+        alloc_stat_t *stat = NULL;
 
         if (_record_alloc_get(p, &stat) == ST_OK) {
 
@@ -145,68 +309,46 @@ static void safe_free(void** pp)
                 free(p);
                 *pp = NULL;
             }
+
+
         }
+
+        free(stat);
     }
 }
 
-static void* alloc(void* dst, size_t size)
-{
-    size_t asize = size + (size % ALLOC_ALIGN);
-    return realloc(dst, asize);
-}
 
 //// zeros allocated memory
-//static void* allocz(void* dst, size_t size)
-//{
-//    size_t asize = size + (size % ALLOC_ALIGN);
-//    char *v = realloc(dst, asize);
-//
-//    if(dst) {
-//        alloc_stat *stat = NULL;
-//
-//        if (_record_alloc_get(dst, &stat) == ST_OK) {
-//            fprintf(stderr, "[allocz] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
-//                    stat->size, asize);
-//
-//            if (asize > stat->size) {
-//                size_t zsize = asize - stat->size;
-//                char *oldp = v + stat->size;
-//                memset(oldp, 0, zsize);
-//            }
-//        }
-//    }
-//    else
-//    {
-//        memset(v, 0, asize);
-//    }
-//
-//    _record_alloc_set(v, asize);
-//    return v;
-//}
-
-// zeros allocated memory
 static void* allocz(void* dst, size_t size)
 {
     size_t asize = size + (size % ALLOC_ALIGN);
-    char *v = malloc(asize);
-    memset(v, 0, asize);
+    char *v = realloc(dst, asize);
 
     if(dst) {
-        alloc_stat *stat = NULL;
+        alloc_stat_t *stat = NULL;
 
         if (_record_alloc_get(dst, &stat) == ST_OK) {
             fprintf(stderr, "[allocz] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
                     stat->size, asize);
 
+            if (asize > stat->size) {
+                size_t zsize = asize - stat->size;
+                char *oldp = v + stat->size;
+                memset(oldp, 0, zsize);
+            }
 
-            memcpy(v, dst, stat->size);
-            safe_free(&dst);
+            free(stat);
         }
+    }
+    else
+    {
+        memset(v, 0, asize);
     }
 
     _record_alloc_set(v, asize);
     return v;
 }
+
 
 static void* alloc_strict(void* dst, size_t size)
 {
@@ -220,7 +362,7 @@ static void* alloc_zstrict(void* dst, size_t size)
     char *v = realloc(dst, asize);
 
     if(dst) {
-        alloc_stat *stat = NULL;
+        alloc_stat_t *stat = NULL;
 
         if (_record_alloc_get(dst, &stat) == ST_OK) {
             fprintf(stderr, "[alloc_zstrict] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
@@ -241,7 +383,6 @@ static void* alloc_zstrict(void* dst, size_t size)
     _record_alloc_set(v, asize);
     return v;
 
-    return v;
 }
 
 static void* mmove(void* dst, const void* src, size_t size)
@@ -253,11 +394,6 @@ static void* mcopy(void* dst, const void* src, size_t size)
 {
     return memcpy(dst, src, size);
 }
-
-//===============================================================
-
-// GLOBALS
-
 
 
 //================================================================
@@ -437,23 +573,24 @@ static unsigned long ht_hash(const char* _str)
 }
 
 
-static int ht_init(struct hashtable_t** ht)
+static int ht_init(hashtable_t** ht)
 {
-    *ht = calloc(sizeof(struct hashtable_t), 1);
+    *ht = calloc(sizeof(hashtable_t), 1);
     return ST_OK;
 }
 
-static void ht_destroy_item(struct ht_item_t* item)
+static void ht_destroy_item(ht_item_t* item)
 {
-    //free(item->name);
+    free(item->key);
+    free(item->value->ptr);
     free(item->value);
     free(item);
 }
 
-static void ht_destroy_items_line(struct ht_item_t* start_item)
+static void ht_destroy_items_line(ht_item_t* start_item)
 {
-    struct ht_item_t* next = start_item;
-    struct ht_item_t* tmp = NULL;
+    ht_item_t* next = start_item;
+    ht_item_t* tmp = NULL;
     while(next)
     {
         tmp = next;
@@ -464,121 +601,41 @@ static void ht_destroy_items_line(struct ht_item_t* start_item)
 }
 
 
-static void ht_destroy(struct hashtable_t* ht)
+static void ht_destroy(hashtable_t* ht)
 {
     for(size_t i = 0; i < HASHTABLE_SIZE; ++i) {
         ht_destroy_items_line(ht->table[i]);
     }
+
+    free(ht);
 }
 
-//static int ht_create_item_s(struct ht_item_t** pitem, const char* name, unsigned long name_hash, const char* value)
-//{
-//    struct ht_item_t* item;
-//    if((item = malloc(sizeof(struct ht_item_t))) == NULL)
-//    {
-//        fprintf(stderr, "[ht_create_item] can't alloc");
-//        return ST_ERR;
-//    }
-//
-//    if((item->name = malloc(strlen(name))) == NULL)
-//    {
-//        free(item);
-//        fprintf(stderr, "[ht_create_item] can't alloc");
-//        return ST_ERR;
-//    }
-//
-//    strcpy(item->name, name);
-//
-//    if((item->value = malloc(strlen(value))) == NULL)
-//    {
-//        free(item->name);
-//        free(item);
-//        fprintf(stderr, "[ht_create_item] can't alloc");
-//        return ST_ERR;
-//    }
-//
-//    strcpy(item->value, value);
-//
-//    item->hash = name_hash;
-//
-//    *pitem = item;
-//
-//    return ST_OK;
-//}
 
-static int ht_create_item(struct ht_item_t** pitem, uint64_t name_hash, char* value)
+static int ht_create_item(ht_item_t** pitem, uint64_t name_hash, ht_value_t* value)
 {
-    struct ht_item_t* item;
-    if((item = calloc(sizeof(struct ht_item_t), 1)) == NULL)
+    ht_item_t* item;
+    if((item = calloc(sizeof(ht_item_t), 1)) == NULL)
     {
         fprintf(stderr, "[ht_create_item] can't alloc");
         return ST_ERR;
     }
 
-    item->value = value;
-
     item->hash = name_hash;
+    item->value = value;
 
     *pitem = item;
 
     return ST_OK;
 }
 
-//static int ht_set_s(struct hashtable_t* ht, const char* name, const char* value)
-//{
-//    unsigned long hash = ht_hash(name);
-//    unsigned long bin =  hash % HASHTABLE_SIZE;
-//
-//    struct ht_item_t* item = ht->table[bin];
-//    struct ht_item_t* prev = NULL;
-//    while(item)
-//    {
-//        if(item->hash == hash)
-//            break;
-//
-//        prev = item;
-//        item = item->next;
-//    }
-//
-//
-//    if(item && item->hash == hash)
-//    {
-//        char* tmp_val = NULL;
-//        if((tmp_val = allocz(NULL,strlen(value))) == NULL)
-//        {
-//            fprintf(stderr, "[ht_set] can't alloc");
-//            return ST_ERR;
-//        }
-//
-//        free(item->value);
-//        item->value = tmp_val;
-//
-//        strcpy(item->value, value);
-//    }
-//    else
-//    {
-//        struct ht_item_t* new_item = NULL;
-//        if((ht_create_item_s(&new_item, name, hash, value)) != ST_OK)
-//        {
-//            return ST_ERR;
-//        }
-//
-//        if(prev)
-//            prev->next = new_item;
-//        else
-//            ht->table[bin] = new_item;
-//    }
-//
-//    return ST_OK;
-//}
 
-static int ht_set(struct hashtable_t* ht, uint64_t i, char* value)
+static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
 {
-    uint64_t hash = crc64(i);
+    uint64_t hash = key->i;
     size_t bin =  hash % HASHTABLE_SIZE;
 
-    struct ht_item_t* item = ht->table[bin];
-    struct ht_item_t* prev = NULL;
+    ht_item_t* item = ht->table[bin];
+    ht_item_t* prev = NULL;
     while(item)
     {
         if(item->hash == hash)
@@ -592,14 +649,17 @@ static int ht_set(struct hashtable_t* ht, uint64_t i, char* value)
     if(item && item->hash == hash)
     {
         item->value = value;
+        free(key);
     }
     else
     {
-        struct ht_item_t* new_item = NULL;
+        ht_item_t* new_item = NULL;
         if((ht_create_item(&new_item, hash, value)) != ST_OK)
         {
             return ST_ERR;
         }
+
+        new_item->key = key;
 
         if(prev)
             prev->next = new_item;
@@ -609,34 +669,12 @@ static int ht_set(struct hashtable_t* ht, uint64_t i, char* value)
 
     return ST_OK;
 }
-
-//static int ht_get_s(struct hashtable_t* ht, const char* name, char** value)
-//{
-//    unsigned long hash = ht_hash(name);
-//    unsigned long bin =  hash % HASHTABLE_SIZE;
-//
-//    struct ht_item_t* item = ht->table[bin];
-//
-//    while(item)
-//    {
-//        if(item->hash == hash)
-//        {
-//            *value = item->value;
-//            return ST_OK;
-//        }
-//
-//        item = item->next;
-//    }
-//
-//    return ST_NOT_FOUND;
-//}
-
-static int ht_get(struct hashtable_t* ht, uint64_t i, char** value)
+static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value)
 {
-    uint64_t hash = crc64(i);
+    uint64_t hash = key->i;
     uint64_t bin =  hash % HASHTABLE_SIZE;
 
-    struct ht_item_t* item = ht->table[bin];
+    ht_item_t* item = ht->table[bin];
 
     while(item)
     {
@@ -650,6 +688,20 @@ static int ht_get(struct hashtable_t* ht, uint64_t i, char** value)
     }
 
     return ST_NOT_FOUND;
+}
+
+static int ht_foreach(hashtable_t* ht, ht_forach_cb cb)
+{
+    for(size_t i = 0; i < HASHTABLE_SIZE; ++i) {
+        ht_item_t* next = ht->table[i];
+        while(next)
+        {
+            cb(next->hash, next->key, next->value);
+            next = next->next;
+        }
+    }
+
+    return ST_OK;
 }
 
 
@@ -869,6 +921,14 @@ static int string_appendnz(string *s, const char *str, size_t len) {
 }
 
 static int string_create(string **s, const char *str) {
+    string_init(s);
+
+    string_append(*s, str);
+
+    return ST_OK;
+}
+
+static int string_createz(string **s, const char *str) {
     string_init(s);
 
     string_appendz(*s, str);
@@ -1429,7 +1489,11 @@ static int test_slist()
             fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
             string_fprint(key, stdout);
             string_fprint(string_null, stdout);
+
+            slist_release(&kv, true);
         }
+
+        slist_release(&tokens, true);
 
     }
 
@@ -1447,82 +1511,14 @@ static int test_slist()
 
 //======================================================================
 
-//uint64_t str2ull(const char *buf, size_t len)
-//{
-//    static const unsigned char ascii_hex[10] ={
-//            0x30, // 0
-//            0x31, // 1
-//            0x32, // 2
-//            0x33, // 3
-//            0x34, // 4
-//            0x35, // 5
-//            0x36, // 6
-//            0x37, // 7
-//            0x38, // 8
-//            0x39  // 9
-//    };
-//
-//    // dec: 2016 - (0x32 0x30 0x32 0x36)
-//    //   0   8  16   24  32   40   48   56   64  -  MSB 64
-//    //---------------------------------------------------
-//
-//    uint64_t msb = 0;
-//    msb |= 0x36;
-//    msb |= 0x32<<8;
-//    msb |= 0x30<<16;
-//    msb |= 0x32<<24;
-//
-//    //  0   8  16  24  32- MSB 32
-//    //---------------------------------------------------
-//
-//    uint32_t msb32 = 0;
-//    msb32 |= 0x36;
-//    msb32 |= 0x32<<8;
-//    msb32 |= 0x30<<16;
-//    msb32 |= 0x32<<24;
-//
-//
-//    //---------------------------------------------------
-//    //   64   56   48   40   32   24   16   8  0 - LSB 64
-//    //---------------------------------------------------
-//
-//    uint64_t lsb = 0;
-//    lsb |= 0x36<<56;
-//    lsb |= 0x32<<48;
-//    lsb |= 0x30<<32;
-//    lsb |= 0x32<<24;
-//
-//
-//    //---------------------------------------------------
-//    //  32   24   16   8   0  - LSB 32
-//    //---------------------------------------------------
-//
-//    uint32_t lsb32 = 0;
-//    lsb32 |= 0x36<<24;
-//    lsb32 |= 0x32<<16;
-//    lsb32 |= 0x30<<8;
-//    lsb32 |= 0x32;
-//
-//    uint64_t u = 0;
-//    for(size_t i = 0, j = 0; i < len; ++i, j+=2)
-//    {
-//        uint64_t ch = (uint64_t)ascii_hex[buf[i]];
-//        uint64_t byte = ch<<(j);
-//        u |= byte;
-//    }
-//
-//    return u;
-//}
+static uint64_t str2ull(const char *str, size_t size) {
+    uint64_t res = 0;
 
+    for (size_t i = 0; i < size; ++i)
+        res = res * 10 + str[i] - '0';
 
-//static uint64_t str2ull(const char *str, size_t size) {
-//    uint64_t res = 0;
-//
-//    for (size_t i = 0; i < size; ++i)
-//        res = res * 10 + str[i] - '0';
-//
-//    return res;
-//}
+    return res;
+}
 
 //========================================================================
 
@@ -1585,272 +1581,312 @@ enum {
 };
 
 
-//static size_t get_sfile_size(const char* filename) {
-//    struct stat st;
-//    stat(filename, &st);
-//    return (size_t) st.st_size;
-//}
-//
-//typedef void(*cmd_exec_cb)(slist*, void *);
-//
-//static void sfile_mmap(const char* filename, string* s)
-//{
-//    size_t filesize = get_sfile_size(filename);
-//    //Open file
-//    int fd = open(filename, O_RDONLY, 0);
-//
-//    //Execute mmap
-//    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
-//
-//    //Write the mmapped data
-//    string_init_n(s, filesize);
-//    string_appendn(s, (char*)data, filesize);
-//
-//    //Cleanup
-//    munmap(data, filesize);
-//    close(fd);
-//}
-//
-//
-//static size_t get_fd_file_size(int fd) {
-//    struct stat st;
-//    fstat(fd, &st);
-//    return (size_t) st.st_size;
-//}
-//
-//static void fd_file_mmap(int fd, string* s)
-//{
-//    size_t filesize = get_fd_file_size(fd);
-//
-//    //Execute mmap
-//    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
-//
-//
-//    //Write the mmapped data
-//    string_init_n(s, filesize);
-//    string_appendn(s, (char*)data, filesize);
-//
-//    //Cleanup
-//    munmap(data, filesize);
-//    close(fd);
-//}
-//
-//static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
-//    FILE *fpipe;
-//
-//    if (!(fpipe = popen(cmd, "r"))) ERROR_EXIT();
-//
-////    char line[1024] = {0};
-//
-//
-////    string output;
-////    while (fgets(buff, sizeof(buff), fpipe)) {
-////        string s
-////        cb(line, ctx);
-////    }
-////
-////    cb(&output, ctx);
-////
-//    pclose(fpipe);
-//
-//    return ST_OK;
-//}
-//
-//
-//enum {
-//    DFS_TOTAL = 0,
-//    DFS_USED = 1,
-//    DFS_AVAIL = 2,
-//    DFS_USE = 3
-//
-//};
-//
-//typedef struct {
-//    uint64_t stat[4];
-//    int skip_first;
-//} DfSingle;
-//
-//
-//static void dfs_init(DfSingle *dfs) {
-//    memset(dfs, 0, sizeof(DfSingle));
-//    dfs->skip_first = 1;
-//}
-//
-//static void dfs_callback(slist* lines, void *ctx) {
-//    DfSingle *dfs = (DfSingle *) ctx;
-//
-//    if (dfs->skip_first) {
-//        dfs->skip_first = 0;
-//        return;
+static size_t get_sfile_size(const char* filename) {
+    struct stat st;
+    stat(filename, &st);
+    return (size_t) st.st_size;
+}
+
+typedef void(*cmd_exec_cb)(slist*, void *);
+
+static void sfile_mmap(const char* filename, string* s)
+{
+    size_t filesize = get_sfile_size(filename);
+    //Open file
+    int fd = open(filename, O_RDONLY, 0);
+
+    //Execute mmap
+    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+
+    //Write the mmapped data
+    string_init(&s);
+    string_appendn(s, (char*)data, filesize);
+
+    //Cleanup
+    munmap(data, filesize);
+    close(fd);
+}
+
+
+static size_t get_fd_file_size(int fd) {
+    struct stat st;
+    fstat(fd, &st);
+    return (size_t) st.st_size;
+}
+
+static void fd_file_mmap(int fd, string* s)
+{
+    size_t filesize = get_fd_file_size(fd);
+
+    //Execute mmap
+    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+
+
+    //Write the mmapped data
+    string_init(&s);
+    string_appendn(s, (char*)data, filesize);
+
+    //Cleanup
+    munmap(data, filesize);
+    close(fd);
+}
+
+static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
+    FILE *fpipe;
+
+    if (!(fpipe = popen(cmd, "r")))
+        return ST_ERR;
+
+//    char line[1024] = {0};
+
+
+//    string output;
+//    while (fgets(buff, sizeof(buff), fpipe)) {
+//        string s
+//        cb(line, ctx);
 //    }
 //
-//    regex_t re;
-//    int reti = regcomp(&re, "([/a-zA-Z1-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)%\\s*([/a-zA-Z1-9-]*)",
-//                       REG_EXTENDED);
-//    if (reti) {
-//        fprintf(stderr, "Could not compile regex\n");
+//    cb(&output, ctx);
+//
+    pclose(fpipe);
+
+    return ST_OK;
+}
+
+
+enum {
+    DFS_TOTAL = 0,
+    DFS_USED = 1,
+    DFS_AVAIL = 2,
+    DFS_USE = 3
+
+};
+
+typedef struct {
+    uint64_t stat[4];
+    int skip_first;
+} DfSingle;
+
+
+static void dfs_init(DfSingle *dfs) {
+    memset(dfs, 0, sizeof(DfSingle));
+    dfs->skip_first = 1;
+}
+
+static void dfs_callback(slist* lines, void *ctx) {
+    DfSingle *dfs = (DfSingle *) ctx;
+
+    if (dfs->skip_first) {
+        dfs->skip_first = 0;
+        return;
+    }
+
+    regex_t re;
+    int reti = regcomp(&re, "([/a-zA-Z1-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)\\s*([0-9]*)%\\s*([/a-zA-Z1-9-]*)",
+                       REG_EXTENDED);
+    if (reti) {
+        fprintf(stderr, "Could not compile regex\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //printf(&source[0]);
+
+//    static const size_t MAX_MATHCHES = 7;
+//    static const size_t MAX_GROUPS = 7;
+//
+//    size_t nmatch = MAX_MATHCHES;
+//    regmatch_t pmatch[MAX_GROUPS];
+//    int rc;
+//
+//    if (0 != (rc = regexec(&re, source, nmatch, pmatch, 0))) {
+//        printf("Failed to match '%s',returning %d.\n", source, rc);
 //        exit(EXIT_FAILURE);
+//    } else {
+//
+//        size_t j = 0;
+//        //skip dev name and mount point
+//        for (size_t i = 2; i < MAX_GROUPS - 1; ++i, ++j) {
+//
+//            size_t msize = (size_t) (pmatch[i].rm_eo - pmatch[i].rm_so);
+//            const char *vals = &source[pmatch[i].rm_so];
+//
+//            dfs->stat[j] = str2ull(vals, msize);
+//
+////
+////            printf("With the whole expression, "
+////                           "a matched substring \"%.*s\" is found at position %d to %d.\n",
+////                   pmatch[i].rm_eo - pmatch[i].rm_so, &source[pmatch[i].rm_so],
+////                   pmatch[i].rm_so, pmatch[i].rm_eo - 1);
+//
+//        }
 //    }
 //
-//    //printf(&source[0]);
+
+    regfree(&re);
+
+}
+
+static void dfs_execute(DfSingle *dfs, const char *dev) {
+
+    string* s;
+    string_create(&s, "df --block-size=1");
+    string_append(s, " ");
+    string_appendz(s, dev);
+
+    char *cmd = NULL;
+    char* cmd_end;
+    string_map_string(s, &cmd, &cmd_end);
+    cmd_execute(cmd, dfs, &dfs_callback);
+}
+
+static uint64_t dfs_total(DfSingle *dfs) { return dfs->stat[DFS_TOTAL]; }
+
+static uint64_t dfs_used(DfSingle *dfs) { return dfs->stat[DFS_USED]; }
+
+static uint64_t dfs_avail(DfSingle *dfs) { return dfs->stat[DFS_AVAIL]; }
+
+static uint64_t dfs_use(DfSingle *dfs) { return dfs->stat[DFS_USE]; }
+
+
+enum
+{
+    BLK_NAME = 0,
+    BLK_FSTYPE,
+    BLK_SCHED,
+    BLK_SIZE,
+    BLK_MODEL,
+    BLK_LABEL,
+    BLK_UUID,
+    BLK_MOUNTPOINT,
+    BLK_LAST
+};
+
+typedef struct {
+    void* p;
+} LsblkSignle;
+
+typedef struct
+{
+    char* ns;
+    char* ne;
+    char* vs;
+    char* ve;
+} kv_pair;
+
+enum
+{
+    SM_CHAR = 0,
+    SM_EQUAL,
+    SM_QUOTE,
+    SM_SPACE
+};
+
+
+static int sm_token(char ch)
+{
+    if(ch == '"') return SM_QUOTE;
+    if(ch == '=') return SM_EQUAL;
+    if(isspace(ch)) return SM_SPACE;
+    return SM_CHAR;
+}
+
+#define FSM_CALLBACK(x) ((size_t)&x)
+
+static void sblk_callback(slist* lines, void *ctx) {
+
+//    printf(source);
 //
-////    static const size_t MAX_MATHCHES = 7;
-////    static const size_t MAX_GROUPS = 7;
-////
-////    size_t nmatch = MAX_MATHCHES;
-////    regmatch_t pmatch[MAX_GROUPS];
-////    int rc;
-////
-////    if (0 != (rc = regexec(&re, source, nmatch, pmatch, 0))) {
-////        printf("Failed to match '%s',returning %d.\n", source, rc);
-////        exit(EXIT_FAILURE);
-////    } else {
-////
-////        size_t j = 0;
-////        //skip dev name and mount point
-////        for (size_t i = 2; i < MAX_GROUPS - 1; ++i, ++j) {
-////
-////            size_t msize = (size_t) (pmatch[i].rm_eo - pmatch[i].rm_so);
-////            const char *vals = &source[pmatch[i].rm_so];
-////
-////            dfs->stat[j] = str2ull(vals, msize);
-////
-//////
-//////            printf("With the whole expression, "
-//////                           "a matched substring \"%.*s\" is found at position %d to %d.\n",
-//////                   pmatch[i].rm_eo - pmatch[i].rm_so, &source[pmatch[i].rm_so],
-//////                   pmatch[i].rm_so, pmatch[i].rm_eo - 1);
-////
-////        }
-////    }
-////
+//    string stat[BLK_LAST];
 //
-//    regfree(&re);
-//
-//}
-//
-//static void dfs_execute(DfSingle *dfs, const char *dev) {
-//
-//    string s;
-//    string_create(&s, "df --block-size=1");
-//    string_append(&s, " ");
-//    string_appendz(&s, dev);
-//
-//    char *cmd = NULL;
-//    size_t cmd_len;
-//    string_get(&s, &cmd, &cmd_len);
-//    cmd_execute(cmd, dfs, &dfs_callback);
-//}
-//
-//static uint64_t dfs_total(DfSingle *dfs) { return dfs->stat[DFS_TOTAL]; }
-//
-//static uint64_t dfs_used(DfSingle *dfs) { return dfs->stat[DFS_USED]; }
-//
-//static uint64_t dfs_avail(DfSingle *dfs) { return dfs->stat[DFS_AVAIL]; }
-//
-//static uint64_t dfs_use(DfSingle *dfs) { return dfs->stat[DFS_USE]; }
-//
-//
-//enum
-//{
-//    BLK_NAME = 0,
-//    BLK_FSTYPE,
-//    BLK_SCHED,
-//    BLK_SIZE,
-//    BLK_MODEL,
-//    BLK_LABEL,
-//    BLK_UUID,
-//    BLK_MOUNTPOINT,
-//    BLK_LAST
-//};
-//
-//typedef struct {
-//
-//} LsblkSignle;
-//
-//typedef struct
-//{
-//    char* ns;
-//    char* ne;
-//    char* vs;
-//    char* ve;
-//} kv_pair;
-//
-//enum
-//{
-//    SM_CHAR = 0,
-//    SM_EQUAL,
-//    SM_QUOTE,
-//    SM_SPACE
-//};
+//    kv_pair m[BLK_LAST];
+//    memset(m, 0, sizeof(m));
 //
 //
-//static int sm_token(char ch)
-//{
-//    if(ch == '"') return SM_QUOTE;
-//    if(ch == '=') return SM_EQUAL;
-//    if(isspace(ch)) return SM_SPACE;
-//    return SM_CHAR;
-//}
 //
-//#define FSM_CALLBACK(x) ((size_t)&x)
-//
-//static void sblk_callback(slist* lines, void *ctx) {
-//
-////    printf(source);
-////
-////    string stat[BLK_LAST];
-////
-////    kv_pair m[BLK_LAST];
-////    memset(m, 0, sizeof(m));
-////
-////
-////
-////    for(size_t i =0, j = 0; i < EXECUTE_LINE_BUFFER; ++i, ++j)
-////    {
-////        m[j].ne = &source[i];
-////        const char ch = source[i];
-////        int tok = sm_token(ch);
-////
-////
-////    }
+//    for(size_t i =0, j = 0; i < EXECUTE_LINE_BUFFER; ++i, ++j)
+//    {
+//        m[j].ne = &source[i];
+//        const char ch = source[i];
+//        int tok = sm_token(ch);
 //
 //
-//}
-//
-//static int sblk_execute(LsblkSignle *sblk, const char *dev) {
-//    static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
-//
-//    string cmd;
-//    string_create(&cmd, "lsblk -i -P -b -o ");
-//    string_append(&cmd, options[0]);
-//
-//
-//    size_t opt_size = sizeof(options) / sizeof(char *);
-//    for (size_t i = 1; i < opt_size; ++i) {
-//        string_append(&cmd, ",");
-//        string_append(&cmd, options[i]);
 //    }
-//
-//    string_append(&cmd, " ");
-//    string_appendz(&cmd, dev);
-//
-//
-//    char *ccmd = NULL;
-//    size_t cmd_len;
-//    string_get(&cmd, &ccmd, &cmd_len);
-//    cmd_execute(ccmd, sblk, &sblk_callback);
-//
-//    return ST_OK;
-//}
-//
+
+
+}
+
+static int sblk_execute(LsblkSignle *sblk, const char *dev) {
+    static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
+
+    string* cmd = NULL;
+    string_create(&cmd, "lsblk -i -P -b -o ");
+    string_append(cmd, options[0]);
+
+
+    size_t opt_size = sizeof(options) / sizeof(char *);
+    for (size_t i = 1; i < opt_size; ++i) {
+        string_append(cmd, ",");
+        string_append(cmd, options[i]);
+    }
+
+    string_append(cmd, " ");
+    string_appendz(cmd, dev);
+
+
+    char *ccmd = NULL;
+    char* cmd_end = NULL;
+    string_map_string(cmd, &ccmd, &cmd_end);
+    cmd_execute(ccmd, sblk, &sblk_callback);
+
+    return ST_OK;
+}
+
+
+
+struct A
+{
+    OBJECT_DECLARE()
+
+    int i;
+    char ch;
+
+    char* str;
+
+};
+
+static uint64_t total_leak = 0;
+
+void scan_alloc(uint64_t hash, ht_key_t* key, ht_value_t* val)
+{
+    fprintf(stderr,"[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t)val->ptr, val->size);
+    total_leak += val->size;
+    key->i = hash;
+}
 
 int main() {
 
     init_gloabls();
-    test_slist();
 
-    ht_destroy(alloc_table);
+
+    //test_slist();
+
+//
+//    struct A* a = OBJECT_CREATE(struct A);
+//    OBJECT_INIT(a);
+//
+//
+//    a->ch = '\n';
+//    a->i = 210490;
+//    a->str = "Hello, World";
+//
+//    {
+//        struct A *b = OBJECT_SHARE(a, struct A);
+//        b->ch = 0;
+//    }
+//
+//    OBJECT_RELEASE(a, struct A);
+//
+
 
 //    for(;;) {
 //        test_slist();
@@ -1866,8 +1902,15 @@ int main() {
 //    dfs_execute(&dfs, "/dev/sdb1");
 
 //
-//    LsblkSignle blk;
-//    sblk_execute(&blk, "/dev/sdb1");
+    LsblkSignle blk;
+    sblk_execute(&blk, "/dev/sdb1");
+
+
+    ht_foreach(alloc_table, &scan_alloc);
+
+    fprintf(stderr, "Total leaked: %lu bytes\n", total_leak);
+
+    globals_shutdown();
 
     return 0;
 }

@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 2.8)
 project(HWMonitor)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DEFAULT_SOURCE -std=c11 -O2 -g  -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-function -Werror -pipe")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DEFAULT_SOURCE -std=c11 -O0 -g  -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-function -Wno-unused-parameter -Werror -pipe")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer")
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=leak")
 
