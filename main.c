@@ -26,10 +26,164 @@
 #include <regex.h>
 #include <math.h>
 #include <stdalign.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <regex.h>
 
 #include <ncurses.h>
 #include <bits/mman.h>
 
+#include <stdarg.h>
+#include <time.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
+#include <assert.h>
+
+
+//=======================================================================
+// LOG
+//=======================================================================
+
+#define LOG_FORMAT_BUFFER_MAX_SIZE 2048
+
+#define LOG_ERROR(...) (_log(__FILE__, __LINE__, LOG_ERROR, __VA_ARGS__))
+#define LOG_DEBUG(...) (_log(__FILE__, __LINE__, LOG_DEBUG, __VA_ARGS__))
+#define LOG_INFO(...) (_log(__FILE__, __LINE__, LOG_INFO, __VA_ARGS__))
+#define LOG_ASSERT(...) (_log(__FILE__, __LINE__, LOG_ASSERT, __VA_ARGS__))
+#define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, LOG_ASSERT, #exp)	 )
+
+#define LOG_RED   "\x1B[31m"
+#define LOG_GRN   "\x1B[32m"
+#define LOG_YEL   "\x1B[33m"
+#define LOG_BLU   "\x1B[34m"
+#define LOG MAG   "\x1B[35m"
+#define LOG_CYN   "\x1B[36m"
+#define LOG_WHT   "\x1B[37m"
+#define LOG_RESET "\x1B[0m"
+
+enum {
+    LOGLEVEL_NONE = 0,
+    LOGLEVEL_INFO,
+    LOGLEVEL_DEBUG,
+    LOGLEVEL_ALL = 0xFFFFFF
+};
+
+enum {
+    LOG_ERROR = 0,
+    LOG_INFO,
+    LOG_DEBUG,
+    LOG_ASSERT
+
+};
+
+static pthread_spinlock_t stderr_spinlock;
+static pthread_spinlock_t stdout_spinlock;
+
+
+static int loglevel = LOGLEVEL_DEBUG;
+
+static void init_log(int loglvl)
+{
+    loglevel = loglvl;
+    pthread_spin_init(&stderr_spinlock, 0);
+    pthread_spin_init(&stdout_spinlock, 0);
+}
+
+static const char* loglevel_s(int lvl)
+{
+    switch(lvl)
+    {
+        case LOG_ERROR:
+            return "ERROR";
+        case LOG_DEBUG:
+            return "DEBUG";
+        case LOG_INFO:
+            return "INFO ";
+        case LOG_ASSERT:
+            return "ASSERTION FAILED";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const char* log_color(int lvl)
+{
+    switch(lvl)
+    {
+        case LOG_ERROR:
+            return LOG_RED;
+        case LOG_DEBUG:
+            return LOG_CYN;
+        case LOG_INFO:
+            return LOG_WHT;
+        case LOG_ASSERT:
+            return LOG_YEL;
+        default:
+            return LOG_RESET;
+    }
+}
+
+static void _log(const char* file, int line, int lvl, ...)
+{
+    if(lvl <= loglevel)
+    {
+        pid_t tid = syscall(__NR_gettid);
+
+        va_list args;
+        va_start(args, lvl);
+        const char* fmt = va_arg(args, const char*);
+
+        char buf[LOG_FORMAT_BUFFER_MAX_SIZE];
+        memset(buf, 0, LOG_FORMAT_BUFFER_MAX_SIZE);
+        vsnprintf(buf, LOG_FORMAT_BUFFER_MAX_SIZE, fmt, args);
+
+        va_end(args);
+
+        if(lvl == LOG_ERROR)
+        {
+            pthread_spin_lock(&stderr_spinlock);
+
+            time_t t = time(NULL);
+            struct tm* tml = localtime(&t);
+
+            fprintf(stderr, "%s[%02d/%02d/%d - %02d:%02d:%02d][0x%08x][%s]: %s%s - %s:%d\n",
+                    LOG_RED,
+                    tml->tm_mday, tml->tm_mon+1, tml->tm_year-100,
+                    tml->tm_hour, tml->tm_min, tml->tm_sec,
+                    tid, loglevel_s(lvl), buf, LOG_RESET, file, line
+            );
+            fflush(stderr);
+
+            pthread_spin_unlock(&stderr_spinlock);
+        }
+        else
+        {
+            pthread_spin_lock(&stdout_spinlock);
+
+            time_t t = time(NULL);
+            struct tm* tml = localtime(&t);
+
+            fprintf(stdout, "%s[%02d/%02d/%d - %02d:%02d:%02d][0x%08x][%s]: %s%s - %s:%d\n",
+                    log_color(lvl),
+                    tml->tm_mday, tml->tm_mon+1, tml->tm_year-100,
+                    tml->tm_hour, tml->tm_min, tml->tm_sec,
+                    tid, loglevel_s(lvl), buf, LOG_RESET, file, line
+            );
+
+            fflush(stdout);
+
+            pthread_spin_unlock(&stdout_spinlock);
+        }
+    }
+}
+
+
+//=======================================================================
+// MACROSES
+//=======================================================================
+
+#define NULLPP(x) ((void**)x == ((void**)0))
 
 #define PTR_TO_U64(ptr) (uint64_t)(uint64_t*)ptr
 
@@ -37,7 +191,8 @@
 //#define ASSERT(x) { if(!(#x)) { fprintf(stderr, "%s:%d [%s]: assertion failed [%s]",  __FILE__, __LINE__, __PRETTY_FUNCTION__, #x); exit(EXIT_FAILURE); }}
 //#define EXIT_IF_NULL(x) if(!(#x)) { fprintf(stderr, "%s:%d [%s]: returns NULL pointer",  __FILE__, __LINE__, __PRETTY_FUNCTION__); exit(EXIT_FAILURE); }
 
-//#define SAFE_RELEASE(x) { if(x && *x){ safe_free((void**)x); *x = NULL; } }
+#define SAFE_RELEASE_PP(x) { if(x && *x){ safe_free((void**)x); *x = NULL; } }
+#define SAFE_RELEASE(x) { if(x){ safe_free(&x); x = NULL; } }
 //#define ERROR_EXIT() { perror(strerror(errno)); exit(errno); }
 
 //===============================================================
@@ -70,7 +225,7 @@ typedef struct ht_key
         char s[8];
         uint64_t i;
 
-    };
+    } u;
 } ht_key_t;
 
 typedef struct ht_value
@@ -107,7 +262,7 @@ static int ht_foreach(hashtable_t* ht, ht_forach_cb cb);
 static int ht_create_key_i(uint64_t keyval, ht_key_t** key)
 {
     *key = malloc(sizeof(ht_key_t));
-    (*key)->i = keyval;
+    (*key)->u.i = keyval;
 
     return ST_OK;
 }
@@ -141,6 +296,8 @@ static void string_init_globals();
 
 static int init_gloabls()
 {
+    init_log(LOGLEVEL_ALL);
+
     stdout_orig = stdout;
     stderr_orig = stderr;
 
@@ -294,7 +451,7 @@ static int _record_alloc_get(void* ptr, alloc_stat_t** stat)
 {
     ht_value_t* val = NULL;
     ht_key_t* key = calloc(sizeof(ht_key_t), 1);
-    key->i = PTR_TO_U64(ptr);
+    key->u.i = PTR_TO_U64(ptr);
     int res = ht_get(alloc_table, key, &val);
     free(key);
     if(res != ST_OK)
@@ -550,7 +707,7 @@ static const uint64_t crc64_tab[256] = {
         UINT64_C(0x536fa08fdfd90e51), UINT64_C(0x29b7d047efec8728),
 };
 
-static uint64_t crc64s(uint64_t crc, const unsigned char *s, uint64_t l) {
+static uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l) {
     uint64_t j;
 
     for (j = 0; j < l; j++) {
@@ -560,17 +717,11 @@ static uint64_t crc64s(uint64_t crc, const unsigned char *s, uint64_t l) {
     return crc;
 }
 
-static uint64_t crc64(uint64_t i)
+
+static uint64_t crc64s(const char* str)
 {
-    uint64_t l = 8UL;
-    uint64_t crc = 0;
-    uint64_t j;
-    for (j = 0; j < l; j++) {
-        uint64_t s = 0xFFUL << (j*8);
-        uint8_t byte = (uint8_t)((i & s)>>(j*8));
-        crc = crc64_tab[(uint8_t)crc ^ byte] ^ (crc >> 8);
-    }
-    return crc;
+    uint64_t l = strlen(str);
+    return crc64(0, (const unsigned char*)str, l);
 }
 
 //=======================================================================
@@ -648,7 +799,7 @@ static int ht_create_item(ht_item_t** pitem, uint64_t name_hash, ht_value_t* val
 
 static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
 {
-    uint64_t hash = key->i;
+    uint64_t hash = key->u.i;
     size_t bin =  hash % HASHTABLE_SIZE;
 
     ht_item_t* item = ht->table[bin];
@@ -688,7 +839,7 @@ static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
 }
 static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value)
 {
-    uint64_t hash = key->i;
+    uint64_t hash = key->u.i;
     uint64_t bin =  hash % HASHTABLE_SIZE;
 
     ht_item_t* item = ht->table[bin];
@@ -863,6 +1014,225 @@ static int da_remove_seq(dynamic_allocator* a, size_t pos, size_t n)
 
 }
 
+//=======================================================================
+// GENERIC LIST
+//=======================================================================
+
+typedef struct list_node
+{
+    void* data;
+    struct list_node* prev;
+    struct list_node* next;
+
+} list_node_t;
+
+typedef struct list
+{
+    list_node_t* head;
+    list_node_t* tail;
+    size_t size;
+    size_t elem_size;
+
+} list_t;
+
+
+static void list_init(list_t** l, size_t elem_size)
+{
+    *l = allocz(NULL, sizeof(list_t));
+    (*l)->elem_size = elem_size;
+}
+
+static void node_init(list_node_t** node)
+{
+    *node = allocz(NULL ,sizeof(list_node_t));
+}
+
+static void* list_dub_data(list_t* l, void* data)
+{
+    void* v = allocz(NULL, l->elem_size);
+    memcpy(v, data, l->elem_size);
+    return v;
+}
+
+static void node_append(list_t* l, bool tail, list_node_t* node, list_node_t* prev, void* data)
+{
+    if(!node)
+        node_init(&node);
+
+    if(node->data == NULL)
+    {
+        node->data = list_dub_data(l, data);
+        node->prev = prev;
+
+        if(prev)
+        {
+            if(tail)
+                prev->next = node;
+            else
+                prev->prev = node;
+        }
+
+        l->size++;
+        if(tail)
+            l->tail = node;
+        else
+            l->head = node;
+        return;
+    }
+
+    node_append(l, tail, node->next, node, data);
+
+}
+
+static void list_append_tail(list_t* l, void* s)
+{
+    if(!l->head)
+        node_init(&l->head);
+
+    if(!l->tail)
+        node_init(&l->tail);
+
+    node_append(l, true, l->head, NULL, s);
+
+}
+
+static void list_append_head(list_t* l, void* s)
+{
+    if(!l->head)
+        node_init(&l->head);
+
+    if(!l->tail)
+        node_init(&l->tail);
+
+    node_append(l, false, l->head, NULL, s);
+
+}
+
+static void* list_pop_head(list_t* l)
+{
+    if(l->size == 0)
+        return NULL;
+
+    list_node_t* tmp = l->head;
+    l->head = tmp->prev;
+    l->size--;
+
+    void* data = tmp->data;
+    safe_free((void**)&tmp);
+
+    return data;
+}
+
+static void* list_crop_tail(list_t* l)
+{
+    if(l->size == 0)
+        return NULL;
+
+    list_node_t* tmp = l->tail;
+    l->tail = tmp->next;
+    l->size--;
+
+    void* data = tmp->data;
+    safe_free((void**)&tmp);
+
+    return data;
+}
+
+static list_node_t* list_next(list_node_t* node)
+{
+    if(!node) return NULL;
+
+    return node->next;
+}
+
+static list_node_t* list_prev(list_node_t* node)
+{
+    if(!node) return NULL;
+
+    return node->prev;
+}
+
+static int list_release(list_t** l)
+{
+    if(NULLPP(l) && *l == NULL)
+        return ST_EMPTY;
+
+
+    list_node_t *head = (*l)->head;
+    while (head) {
+
+        head = head->next;
+
+        list_node_t *tmp = head;
+        safe_free((void **) &tmp);
+    }
+
+    safe_free((void **)l);
+    *l = NULL;
+
+
+    return ST_OK;
+
+}
+
+static int list_merge(list_t* a, list_t* b)
+{
+    if(a->size == 0 && b->size == 0)
+        return ST_ERR;
+
+
+    a->tail->next = b->head;
+    b->head->prev = a->tail;
+    a->size+= b->size;
+    a->tail = b->tail;
+
+    return ST_OK;
+}
+
+static int list_remove(list_t* l, void* data)
+{
+    list_node_t* head = l->head;
+
+    while(head)
+    {
+        if(head->data == data)
+        {
+            list_node_t* hn = head->next;
+            list_node_t* hp = head->prev;
+
+            hn->prev = hp;
+            hp->next = hn;
+
+            free(head);
+
+            return ST_OK;
+
+        }
+
+        head = head->next;
+    }
+
+    return ST_NOT_FOUND;
+}
+
+typedef void(*list_traverse_cb)(list_node_t*);
+
+
+static int list_traverse(list_t* l, bool forward, list_traverse_cb cb)
+{
+    if(!l) return ST_EMPTY;
+
+
+    list_node_t* cur = forward? l->tail : l->head;
+
+    while(cur)
+    {
+        cb(cur);
+        cur = forward? cur->next : cur->prev;
+    }
+
+    return ST_OK;
+}
 
 //=======================================================================
 // GENERIC VECTOR
@@ -1068,14 +1438,18 @@ static int string_add(string *a, string *b) {
 
 static int string_pop_head(string* s)
 {
-    --s->alloc->used;
-    --s->size;
-    da_shink(s->alloc, true);
+    if(s && s->alloc && s->alloc->ptr && s->size > 2) {
+        --s->alloc->used;
+        --s->size;
+        da_shink(s->alloc, true);
 
-    if(s->nt)
-        s->alloc->ptr[s->alloc->size-1] = '\0';
+        if (s->nt)
+            s->alloc->ptr[s->alloc->size - 1] = '\0';
 
-    return ST_OK;
+        return ST_OK;
+    }
+
+    return ST_ERR;
 }
 
 static int string_crop_tail(string* s)
@@ -1122,12 +1496,10 @@ static int string_compare(string* a, string* b)
     return ST_NOT_FOUND;
 }
 
+
 static int string_comparez(string* a, const char* cmp)
 {
-    if(strncmp(a->alloc->ptr, cmp, strlen(cmp)) == 0)
-        return ST_OK;
-
-    return ST_NOT_FOUND;
+    return strncmp(a->alloc->ptr, cmp, strlen(cmp));
 }
 
 static void string_map_region(string* s, size_t beg, size_t end, char** sb, char** se)
@@ -1404,43 +1776,8 @@ static int string_remove_dubseq(string* s, char delm)
     return ST_OK;
 }
 
-static int string_split(string* s, char delm, slist** sl)
-{
-    if(s->size == 0)
-        return ST_EMPTY;
-
-
-    string_remove_dubseq(s, delm);
-
-    slist_init(sl);
-    char* cb = NULL;
-    char* end = NULL;
-
-
-    string_map_string(s, &cb, &end);
-    char* ccur = cb;
-
-    while(ccur  <= end)
-    {
-        if(*ccur == delm || *ccur == '\0')
-        {
-
-            string* ss = NULL;
-            string_init(&ss);
-            string_appendnz(ss, cb, (size_t)(ccur-cb));
-
-            slist_append(*sl, ss);
-
-            cb = ++ccur;
-        }
-
-        ++ccur;
-    }
-
-    return ST_OK;
-}
-
 static const char strip_dict[] = { '\0', '\n', '\r', '\t', ' ', '"', '\"', '\'' };
+static const char strip_dict_ws[] = { '\0', '\n', '\r', '\t', ' '};
 
 static bool check_strip_dict(char ch)
 {
@@ -1490,6 +1827,430 @@ static int string_strip(string* s) {
     string_lstrip(s);
 
     return ST_OK;
+}
+
+static bool check_strip_dict_ws(char ch)
+{
+    for(size_t i = 0; i < sizeof(strip_dict_ws)/sizeof(char); ++i)
+        if(ch == strip_dict_ws[i])
+            return true;
+
+    return false;
+}
+
+static int string_rstrip_ws(string* s)
+{
+    while(s->size > 2)
+    {
+
+        size_t idx = s->size - 1;
+        char sch = string_get_ch(s, idx);
+
+        uint64_t nt = s->nt;
+        if(check_strip_dict_ws(sch)) {
+            s->nt = 0;
+            string_pop_head(s);
+        }
+        else {
+            s->nt = nt;
+            return ST_OK;
+        }
+
+    }
+
+    return ST_OK;
+}
+
+static int string_split(string* s, char delm, slist** sl)
+{
+    if(s->size == 0)
+        return ST_EMPTY;
+
+
+    string_rstrip_ws(s);
+    string_remove_dubseq(s, delm);
+
+    slist_init(sl);
+    char* cb = NULL;
+    char* end = NULL;
+
+
+    string_map_string(s, &cb, &end);
+    char* ccur = cb;
+
+    while(ccur  <= end)
+    {
+        if(*ccur == delm || ccur == end)
+        {
+            //while(*(++ccur) == delm && ccur == end);
+
+
+            string* ss = NULL;
+            string_init(&ss);
+            string_appendnz(ss, cb, (size_t)(ccur-cb));
+
+            slist_append(*sl, ss);
+
+            cb = ++ccur;
+        }
+
+        ++ccur;
+    }
+
+    return ST_OK;
+}
+
+//=============================================================================================
+// HASH BINARY TREE
+//=============================================================================================
+
+typedef struct bt_node
+{
+    uint64_t hash_key;
+    void* data;
+    size_t size;
+    struct bt_node* prev;
+    struct bt_node* left;
+    struct bt_node* right;
+
+} bt_node_t;
+
+static int bt_node_create(bt_node_t** bt, uint64_t hash, void* data, size_t size)
+{
+    *bt = allocz(NULL, sizeof(bt_node_t));
+    bt_node_t* b = *bt;
+    b->hash_key = hash;
+
+    b->data = allocz(NULL, size);
+    memcpy(b->data, data, size);
+
+    return ST_OK;
+}
+
+static int bt_node_release(bt_node_t **bt) {
+
+    if (NULLPP(bt) || *bt == NULL)
+        return ST_EMPTY;
+
+    bt_node_t *b = *bt;
+    SAFE_RELEASE(b->data);
+
+    bt_node_release(&b->left);
+    bt_node_release(&b->right);
+
+    return ST_OK;
+}
+
+
+static int bt_node_set(bt_node_t** bt, bt_node_t* prev, uint64_t hash, void* data, size_t size)
+{
+    if(*bt == NULL)
+    {
+        *bt = allocz(NULL, sizeof(bt_node_t));
+        bt_node_t* b = *bt;
+        b->hash_key = hash;
+        b->prev = prev;
+
+        b->data = allocz(NULL, size);
+        memcpy(b->data, data, size);
+
+        return ST_OK;
+    }
+    else
+    {
+        bt_node_t* b = *bt;
+
+        if(b->hash_key > hash)
+            return bt_node_set(&b->right, b, hash, data, size);
+        else if(b->hash_key < hash)
+            return bt_node_set(&b->left, b, hash, data, size);
+        else
+        {
+            SAFE_RELEASE(b->data);
+
+            b->data = allocz(NULL, size);
+            memcpy(b->data, data, size);
+
+            return ST_OK;
+        }
+
+    }
+}
+
+
+static int bt_node_get(bt_node_t* bt, uint64_t hash, void** data)
+{
+    if(bt == NULL)
+        return ST_NOT_FOUND;
+
+    if(bt->hash_key > hash)
+        return bt_node_get(bt->right, hash, data);
+    else if(bt->hash_key < hash)
+        return bt_node_get(bt->left, hash, data);
+    else
+    {
+        *data = bt->data;
+        return ST_OK;
+    }
+}
+
+static int bt_node_left(bt_node_t* bt, bt_node_t** left)
+{
+    bt_node_t* cur = bt;
+
+    while(cur && cur->left)
+        cur = cur->left;
+
+    *left = cur;
+
+    return ST_OK;
+}
+
+typedef void(*bt_node_traverse_cb)(bt_node_t*);
+
+static void bt_node_traverse(bt_node_t* bt, bt_node_traverse_cb cb)
+{
+    if(bt == NULL) return;
+
+    bt_node_traverse(bt->left, cb);
+    bt_node_traverse(bt->right, cb);
+
+    cb(bt);
+}
+
+// froentends
+
+typedef struct binary_tree
+{
+    bt_node_t* head;
+    size_t elem_size;
+} binary_tree_t;
+
+
+static int bt_init(binary_tree_t** bt, size_t elem_size)
+{
+    *bt = allocz(NULL, sizeof(binary_tree_t));
+    (*bt)->elem_size = elem_size;
+
+    return ST_OK;
+}
+
+static int bt_release(binary_tree_t** bt)
+{
+    if(NULLPP(bt) || *bt == NULL)
+        return ST_EMPTY;
+
+    bt_node_release(&(*bt)->head);
+
+    safe_free((void**)bt);
+
+    return ST_OK;
+}
+
+
+//simple char*:int froentend
+
+typedef struct str_int
+{
+    const char* str;
+    uint64_t i;
+} str_int_t;
+
+static str_int_t heap_str_int_decode(void* p)
+{
+    str_int_t i;
+    memcpy(&i, p, sizeof(str_int_t));
+
+    return i;
+}
+
+static int bt_si_set(binary_tree_t* bt, const char* key, uint64_t i)
+{
+    uint64_t hash = crc64s(key);
+    str_int_t data;
+    data.str = key;
+    data.i = i;
+    return bt_node_set(&bt->head, NULL, hash, &data, bt->elem_size);
+}
+
+static int bt_si_get(binary_tree_t* bt, const char* key, str_int_t** i)
+{
+    uint64_t hash = crc64s(key);
+    void* p = NULL;
+    int ret = bt_node_get(bt->head, hash, &p);
+    if(ret != ST_OK)
+        return ret;
+
+    //**i = heap_str_int_decode(p);
+    *i = (str_int_t*)p;
+
+    return ret;
+}
+
+static void bt_si_traverse_cb(bt_node_t* node)
+{
+    static int counter = 1;
+    str_int_t i = heap_str_int_decode(node->data);
+
+    LOG_DEBUG("[%d][%08lX] %s : 0x%lX\n", counter++, node->hash_key, i.str, i.i);
+}
+
+
+static void bt_si_traverse(binary_tree_t* bt)
+{
+    bt_node_traverse(bt->head, &bt_si_traverse_cb);
+}
+
+//=============================================================================================
+// TESTS
+//=============================================================================================
+
+
+static void test_hash_bt()
+{
+    binary_tree_t* bt;
+    str_int_t* node = NULL;
+    bt_init(&bt, sizeof(str_int_t));
+
+    bt_si_set(bt, "1", 1);
+    bt_si_set(bt, "2", 2);
+    bt_si_set(bt, "3", 3);
+    bt_si_set(bt, "4", 4);
+    bt_si_set(bt, "5", 5);
+    bt_si_set(bt, "6", 6);
+    bt_si_set(bt, "7", 7);
+    bt_si_set(bt, "8", 8);
+    bt_si_set(bt, "9", 9);
+    bt_si_set(bt, "10", 0xA);
+    bt_si_set(bt, "11", 0xB);
+    bt_si_set(bt, "12", 0xC);
+    bt_si_set(bt, "13", 0xD);
+    bt_si_set(bt, "14", 0xE);
+    bt_si_set(bt, "15", 0xF);
+
+
+    bt_si_get(bt, "1", &node);
+    ASSERT(node->i == 0x1);
+    bt_si_get(bt, "2", &node);
+    ASSERT(node->i == 0x2);
+    bt_si_get(bt, "3", &node);
+    ASSERT(node->i == 0x3);
+    bt_si_get(bt, "4", &node);
+    ASSERT(node->i == 0x4);
+    bt_si_get(bt, "5", &node);
+    ASSERT(node->i == 0x5);
+    bt_si_get(bt, "6", &node);
+    ASSERT(node->i == 0x6);
+    bt_si_get(bt, "7", &node);
+    ASSERT(node->i == 0x7);
+    bt_si_get(bt, "8", &node);
+    ASSERT(node->i == 0x8);
+    bt_si_get(bt, "9", &node);
+    ASSERT(node->i == 0x9);
+    bt_si_get(bt, "10", &node);
+    ASSERT(node->i == 0xA);
+    bt_si_get(bt, "11", &node);
+    ASSERT(node->i == 0xB);
+    bt_si_get(bt, "12", &node);
+    ASSERT(node->i == 0xC);
+    bt_si_get(bt, "13", &node);
+    ASSERT(node->i == 0xD);
+    bt_si_get(bt, "14", &node);
+    ASSERT(node->i == 0xE);
+    bt_si_get(bt, "15", &node);
+    ASSERT(node->i == 0xF);
+
+    bt_si_get(bt, "11", &node); node->i = 0xB;
+    bt_si_get(bt, "12", &node); node->i = 0xC;
+    bt_si_get(bt, "13", &node); node->i = 0xD;
+    bt_si_get(bt, "14", &node); node->i = 0xE;
+    bt_si_get(bt, "15", &node); node->i = 0xF;
+
+    bt_si_get(bt, "11", &node);
+    ASSERT(node->i == 0xB);
+    bt_si_get(bt, "12", &node);
+    ASSERT(node->i == 0xC);
+    bt_si_get(bt, "13", &node);
+    ASSERT(node->i == 0xD);
+    bt_si_get(bt, "14", &node);
+    ASSERT(node->i == 0xE);
+    bt_si_get(bt, "15", &node);
+    ASSERT(node->i == 0xF);
+
+
+    bt_si_traverse(bt);
+
+    bt_si_set(bt, "1", 0);
+    bt_si_set(bt, "2", 0);
+    bt_si_set(bt, "3", 0);
+    bt_si_set(bt, "4", 0);
+    bt_si_set(bt, "5", 0);
+    bt_si_set(bt, "6", 0);
+    bt_si_set(bt, "7", 0);
+    bt_si_set(bt, "8", 0);
+    bt_si_set(bt, "9", 0);
+    bt_si_set(bt, "10", 0x0);
+    bt_si_set(bt, "11", 0x0);
+    bt_si_set(bt, "12", 0x0);
+    bt_si_set(bt, "13", 0x0);
+    bt_si_set(bt, "14", 0x0);
+    bt_si_set(bt, "15", 0x0);
+
+    bt_si_get(bt, "1", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "2", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "3", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "4", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "5", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "6", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "7", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "8", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "9", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "10", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "11", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "12", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "13", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "14", &node);
+    ASSERT(node->i == 0);
+    bt_si_get(bt, "15", &node);
+    ASSERT(node->i == 0);
+
+
+    bt_si_get(bt, "10", &node); node->i = 0xA;
+    bt_si_get(bt, "11", &node); node->i = 0xB;
+    bt_si_get(bt, "12", &node); node->i = 0xC;
+    bt_si_get(bt, "13", &node); node->i = 0xD;
+    bt_si_get(bt, "14", &node); node->i = 0xE;
+    bt_si_get(bt, "15", &node); node->i = 0xF;
+
+    bt_si_get(bt, "10", &node);
+    ASSERT(node->i == 0xA);
+    bt_si_get(bt, "11", &node);
+    ASSERT(node->i == 0xB);
+    bt_si_get(bt, "12", &node);
+    ASSERT(node->i == 0xC);
+    bt_si_get(bt, "13", &node);
+    ASSERT(node->i == 0xD);
+    bt_si_get(bt, "14", &node);
+    ASSERT(node->i == 0xE);
+    bt_si_get(bt, "15", &node);
+    ASSERT(node->i == 0xF);
+
+    bt_si_traverse(bt);
+
+    bt_release(&bt);
 }
 
 
@@ -1838,7 +2599,7 @@ static int ht_set_df(hashtable_t* ht, string* key, df_stat_t* stat)
 {
 
     ht_key_t* hkey = NULL;
-    uint64_t hash = crc64s(0, (uint8_t*)key->alloc->ptr, key->size);
+    uint64_t hash = crc64(0, (uint8_t*)key->alloc->ptr, key->size);
     ht_create_key_i(hash, &hkey);
 
     ht_value_t* val = NULL;
@@ -2019,7 +2780,7 @@ static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
 {
 
     ht_key_t* hkey = NULL;
-    uint64_t hash = crc64s(0, (uint8_t*)key->alloc->ptr, key->size);
+    uint64_t hash = crc64(0, (uint8_t*)key->alloc->ptr, key->size);
     ht_create_key_i(hash, &hkey);
 
     ht_value_t* val = NULL;
@@ -2030,13 +2791,94 @@ static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
     return ST_OK;
 }
 
+#define MAX_ERROR_MSG 0x1000
 
+/* Compile the regular expression described by "regex_text" into
+   "r". */
+
+static int compile_regex (regex_t * r, const char * regex_text)
+{
+    int status = regcomp (r, regex_text, REG_EXTENDED|REG_NEWLINE);
+    if (status != 0) {
+        char error_message[MAX_ERROR_MSG];
+        regerror (status, r, error_message, MAX_ERROR_MSG);
+        fprintf (stderr, "Regex error compiling '%s': %s\n",
+                regex_text, error_message);
+        return 1;
+    }
+    return 0;
+}
+
+/*
+  Match the string in "to_match" against the compiled regular
+  expression in "r".
+ */
+
+static int match_regex (regex_t * r, const char * to_match)
+{
+    /* "P" is a pointer into the string which points to the end of the
+       previous match. */
+    const char * p = to_match;
+    /* "N_matches" is the maximum number of matches allowed. */
+    const int n_matches = 10;
+    /* "M" contains the matches found. */
+    regmatch_t m[n_matches];
+
+    while (1) {
+        int i = 0;
+        int nomatch = regexec (r, p, n_matches, m, 0);
+        if (nomatch) {
+            printf ("No more matches.\n");
+            return nomatch;
+        }
+        for (i = 0; i < n_matches; i++) {
+            int start;
+            int finish;
+            if (m[i].rm_so == -1) {
+                break;
+            }
+            start = (int) (m[i].rm_so + (p - to_match));
+            finish = (int) (m[i].rm_eo + (p - to_match));
+            if (i == 0) {
+                printf ("$& is ");
+            }
+            else {
+                printf ("$%d is ", i);
+            }
+            printf ("'%.*s' (bytes %d:%d)\n", (finish - start),
+                    to_match + start, start, finish);
+        }
+        p += m[0].rm_eo;
+    }
+    return 0;
+}
 
 
 static void sblk_callback(void *ctx, slist* lines) {
 
-    sblkid_t* sys = (sblkid_t*)ctx;
+    sblkid_t *sys = (sblkid_t *) ctx;
     ht_init(&sys->blk);
+
+    {
+        string *tk = NULL;
+        slist_init_current(lines);
+        while ((tk = slist_next(lines)) != NULL) {
+
+            fprintf(stdout, "------- TOKEN LINE-----------\n");
+            string_fprint(tk, stdout);
+
+
+            //================================
+            regex_t re;
+            compile_regex(&re, "(\\w+)=\"([[:alnum:][:space:]-]*)\"");
+
+            match_regex(&re, tk->alloc->ptr);
+
+            //================================
+        }
+    }
+
+    return;
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
     slist_fprint(lines, stdout);
@@ -2054,6 +2896,7 @@ static void sblk_callback(void *ctx, slist* lines) {
         slist* tokens = NULL;
         string_split(tk,' ',&tokens);
 
+
         slist_fprint(tokens, stdout);
 
         slist_init_current(tokens);
@@ -2070,6 +2913,7 @@ static void sblk_callback(void *ctx, slist* lines) {
         string *s = NULL;
         string* sname = NULL;
         while ((s = slist_next(tokens)) != NULL) {
+
 
             slist *kv = NULL;
             string_split(s, '=', &kv);
@@ -2646,7 +3490,7 @@ void scan_alloc(uint64_t hash, ht_key_t* key, ht_value_t* val)
 {
     fprintf(stderr,"[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t)val->ptr, val->size);
     total_leak += val->size;
-    key->i = hash;
+    key->u.i = hash;
 }
 
 
@@ -2664,7 +3508,7 @@ void scan_blk(uint64_t hash, ht_key_t* key, ht_value_t* val)
     }
 
 
-    key->i = hash;
+    key->u.i = hash;
 }
 
 
@@ -2679,7 +3523,7 @@ void scan_df(uint64_t hash, ht_key_t* key, ht_value_t* val)
 
 
 
-    key->i = hash;
+    key->u.i = hash;
 }
 
 int main() {
@@ -2689,6 +3533,8 @@ int main() {
     enable_stdout(true);
     enable_stderr(true);
 
+
+    test_hash_bt();
     //test_slist();
 
 //
@@ -2718,17 +3564,17 @@ int main() {
 
 
 
-    df_t* df;
-    df_init(&df);
-    df_execute(df);
-    ht_foreach(df->stats, &scan_df);
+//    df_t* df;
+//    df_init(&df);
+//    df_execute(df);
+//    ht_foreach(df->stats, &scan_df);
 
 
 
-    sblkid_t blk;
-    sblk_execute(&blk);
-
-    ht_foreach(blk.blk, &scan_blk);
+//    sblkid_t blk;
+//    sblk_execute(&blk);
+//
+//    ht_foreach(blk.blk, &scan_blk);
 
 
     //ht_foreach(alloc_table, &scan_alloc);
