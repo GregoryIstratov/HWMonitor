@@ -1,57 +1,72 @@
-// macro settings
-
-
-//posix
-
 #include <fcntl.h>
+#include <unistd.h>
 #include <malloc.h>
-#include <ctype.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/types.h>
-#include <sys/param.h> // max/min
-#include <fcntl.h>
-#include <err.h>
-#include <errno.h>
-#include <blkid/blkid.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <sys/statvfs.h>
-
-// c standart headers
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <regex.h>
-#include <math.h>
-#include <stdalign.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <regex.h>
-
-#include <ncurses.h>
+#include <sys/param.h>
+#include <sys/syscall.h>
 #include <bits/mman.h>
 
-#include <stdarg.h>
-#include <time.h>
-#include <sys/syscall.h>
-#include <sys/time.h>
+#include <blkid/blkid.h>
+#include <pthread.h>
+#include <ncurses.h>
+
+#include <ctype.h>
+#include <string.h>
+#include <regex.h>
 #include <assert.h>
 
-
+#include <time.h>
+#include <sys/time.h>
 //=======================================================================
 // LOG
 //=======================================================================
 
+//#define ENABLE_LOGGING
+
+#ifndef ENABLE_LOGGING
+#define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
+#define LOG_WARN(...) (_log(stdout, __VA_ARGS__))
+#define LOG_DEBUG(...) (_log(stdout, __VA_ARGS__))
+#define LOG_INFO(...) (_log(stdout, __VA_ARGS__))
+#define LOG_TRACE(...) (_log(stdout, __VA_ARGS__))
+#define LOG_ASSERT(...) (_log(stdout, __VA_ARGS__))
+#define ASSERT(exp) (assert(exp))
+
+
+static void _log(FILE* out, ...)
+{
+    va_list args;
+    va_start(args, out);
+    const char *fmt = va_arg(args, const char*);
+
+    vfprintf(out, fmt, args);
+    fputc('\n', out);
+
+    va_end(args);
+}
+
+
+#else
+#define LOG_ERROR(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ERROR, __VA_ARGS__))
+#define LOG_WARN(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_WARN, __VA_ARGS__))
+#define LOG_DEBUG(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_DEBUG, __VA_ARGS__))
+#define LOG_INFO(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_INFO, __VA_ARGS__))
+#define LOG_TRACE(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_TRACE, __VA_ARGS__))
+#define LOG_ASSERT(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ASSERT, __VA_ARGS__))
+#define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ASSERT, #exp))
+
+#define LOG_SHOW_TIME
+#define LOG_SHOW_DATE
+#define LOG_SHOW_THREAD
+#define LOG_SHOW_PATH
+#define LOG_ENABLE_MULTITHREADING
+
 #define LOG_FORMAT_BUFFER_MAX_SIZE 2048
 
-#define LOG_ERROR(...) (_log(__FILE__, __LINE__, LOG_ERROR, __VA_ARGS__))
-#define LOG_DEBUG(...) (_log(__FILE__, __LINE__, LOG_DEBUG, __VA_ARGS__))
-#define LOG_INFO(...) (_log(__FILE__, __LINE__, LOG_INFO, __VA_ARGS__))
-#define LOG_ASSERT(...) (_log(__FILE__, __LINE__, LOG_ASSERT, __VA_ARGS__))
-#define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, LOG_ASSERT, #exp)	 )
+
 
 #define LOG_RED   "\x1B[31m"
 #define LOG_GRN   "\x1B[32m"
@@ -64,42 +79,50 @@
 
 enum {
     LOGLEVEL_NONE = 0,
+    LOGLEVEL_WARN,
     LOGLEVEL_INFO,
     LOGLEVEL_DEBUG,
+    LOGLEVEL_TRACE,
     LOGLEVEL_ALL = 0xFFFFFF
 };
 
 enum {
     LOG_ERROR = 0,
+    LOG_WARN,
     LOG_INFO,
     LOG_DEBUG,
+    LOG_TRACE,
     LOG_ASSERT
 
 };
 
+#ifdef LOG_ENABLE_MULTITHREADING
 static pthread_spinlock_t stderr_spinlock;
 static pthread_spinlock_t stdout_spinlock;
-
+#endif
 
 static int loglevel = LOGLEVEL_DEBUG;
 
-static void init_log(int loglvl)
-{
+static void init_log(int loglvl) {
     loglevel = loglvl;
+#ifdef LOG_ENABLE_MULTITHREADING
     pthread_spin_init(&stderr_spinlock, 0);
     pthread_spin_init(&stdout_spinlock, 0);
+#endif
 }
 
-static const char* loglevel_s(int lvl)
-{
-    switch(lvl)
-    {
+static const char *loglevel_s(int lvl) {
+    switch (lvl) {
         case LOG_ERROR:
-            return "ERROR";
+            return "ERR";
+        case LOG_WARN:
+            return "WRN";
         case LOG_DEBUG:
-            return "DEBUG";
+            return "DBG";
         case LOG_INFO:
-            return "INFO ";
+            return "INF";
+        case LOG_TRACE:
+            return "TRC";
         case LOG_ASSERT:
             return "ASSERTION FAILED";
         default:
@@ -107,16 +130,18 @@ static const char* loglevel_s(int lvl)
     }
 }
 
-static const char* log_color(int lvl)
-{
-    switch(lvl)
-    {
+static const char *log_color(int lvl) {
+    switch (lvl) {
         case LOG_ERROR:
             return LOG_RED;
         case LOG_DEBUG:
             return LOG_CYN;
         case LOG_INFO:
+            return LOG_GRN;
+        case LOG_TRACE:
             return LOG_WHT;
+        case LOG_WARN:
+            return LOG_YEL;
         case LOG_ASSERT:
             return LOG_YEL;
         default:
@@ -124,15 +149,16 @@ static const char* log_color(int lvl)
     }
 }
 
-static void _log(const char* file, int line, int lvl, ...)
-{
-    if(lvl <= loglevel)
-    {
+static void _log(const char *file, int line, const char *fun, int lvl, ...) {
+    if (lvl <= loglevel) {
+
+#ifdef LOG_SHOW_THREAD
         pid_t tid = syscall(__NR_gettid);
+#endif
 
         va_list args;
         va_start(args, lvl);
-        const char* fmt = va_arg(args, const char*);
+        const char *fmt = va_arg(args, const char*);
 
         char buf[LOG_FORMAT_BUFFER_MAX_SIZE];
         memset(buf, 0, LOG_FORMAT_BUFFER_MAX_SIZE);
@@ -140,44 +166,53 @@ static void _log(const char* file, int line, int lvl, ...)
 
         va_end(args);
 
-        if(lvl == LOG_ERROR)
+
+#ifdef LOG_ENABLE_MULTITHREADING
+        pthread_spin_lock(&stdout_spinlock);
+#endif
+
+#if defined LOG_SHOW_TIME || defined LOG_SHOW_DATE
+        time_t t;
+        struct tm _tml;
+        struct tm* tml;
+        if(time(&t) == (time_t)-1)
         {
-            pthread_spin_lock(&stderr_spinlock);
-
-            time_t t = time(NULL);
-            struct tm* tml = localtime(&t);
-
-            fprintf(stderr, "%s[%02d/%02d/%d - %02d:%02d:%02d][0x%08x][%s]: %s%s - %s:%d\n",
-                    LOG_RED,
-                    tml->tm_mday, tml->tm_mon+1, tml->tm_year-100,
-                    tml->tm_hour, tml->tm_min, tml->tm_sec,
-                    tid, loglevel_s(lvl), buf, LOG_RESET, file, line
-            );
-            fflush(stderr);
-
-            pthread_spin_unlock(&stderr_spinlock);
+            LOG_ERROR("time return failed");
+            return;
         }
-        else
-        {
-            pthread_spin_lock(&stdout_spinlock);
 
-            time_t t = time(NULL);
-            struct tm* tml = localtime(&t);
+        localtime_r(&t, &_tml);
+        tml = &_tml;
 
-            fprintf(stdout, "%s[%02d/%02d/%d - %02d:%02d:%02d][0x%08x][%s]: %s%s - %s:%d\n",
-                    log_color(lvl),
-                    tml->tm_mday, tml->tm_mon+1, tml->tm_year-100,
-                    tml->tm_hour, tml->tm_min, tml->tm_sec,
-                    tid, loglevel_s(lvl), buf, LOG_RESET, file, line
-            );
+#endif
 
-            fflush(stdout);
+        fprintf(stdout, "%s", log_color(lvl));
+#ifdef LOG_SHOW_TIME
+        fprintf(stdout, "[%02d:%02d:%02d]", tml->tm_hour, tml->tm_min, tml->tm_sec);
+#endif
+#ifdef LOG_SHOW_DATE
+        fprintf(stdout, "[%02d/%02d/%d]", tml->tm_mday, tml->tm_mon + 1, tml->tm_year - 100);
+#endif
+#ifdef LOG_SHOW_THREAD
+        fprintf(stdout, "[0x%08x]", tid);
+#endif
 
-            pthread_spin_unlock(&stdout_spinlock);
-        }
+        fprintf(stdout, "[%s][%s]: %s%s", loglevel_s(lvl), fun, buf, LOG_RESET);
+
+#ifdef LOG_SHOW_PATH
+        fprintf(stdout, " - %s:%d", file, line);
+#endif
+        fprintf(stdout, "\n");
+        fflush(stdout);
+
+#ifdef LOG_ENABLE_MULTITHREADING
+        pthread_spin_unlock(&stdout_spinlock);
+#endif
+
     }
 }
 
+#endif // ENABLE_LOGGING
 
 //=======================================================================
 // MACROSES
@@ -196,10 +231,16 @@ static void _log(const char* file, int line, int lvl, ...)
 //#define ERROR_EXIT() { perror(strerror(errno)); exit(errno); }
 
 //===============================================================
-#define STRING_INIT_BUFFER 16
+#define STRING_INIT_BUFFER 4
 #define ALLOC_ALIGN 16
 
 #define HASHTABLE_SIZE 16
+
+#define DA_MAX_MULTIPLICATOR 4
+
+#define KiB 1024UL
+#define MiB 1048576UL
+#define GiB 1073741824UL
 //===============================================================
 // GLOBAS
 //===============================================================
@@ -218,57 +259,51 @@ enum {
 //
 //======================================================================================================================
 
-typedef struct ht_key
-{
-    union
-    {
+typedef struct ht_key {
+    union {
         char s[8];
         uint64_t i;
 
     } u;
 } ht_key_t;
 
-typedef struct ht_value
-{
-    void* ptr;
+typedef struct ht_value {
+    void *ptr;
     size_t size;
 } ht_value_t;
 
-typedef struct _ht_item_t
-{
-    ht_key_t*   key;
-    ht_value_t* value;
+typedef struct _ht_item_t {
+    ht_key_t *key;
+    ht_value_t *value;
     uint64_t hash;
-    struct _ht_item_t* next;
+    struct _ht_item_t *next;
 } ht_item_t;
 
-typedef struct _hashtable_t
-{
-    ht_item_t* table[HASHTABLE_SIZE];
+typedef struct _hashtable_t {
+    ht_item_t *table[HASHTABLE_SIZE];
 } hashtable_t;
 
-static int ht_init(hashtable_t** ht);
+static int ht_init(hashtable_t **ht);
 
-static void ht_destroy(hashtable_t* ht);
+static void ht_destroy(hashtable_t *ht);
 
-static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value);
-static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value);
+static int ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value);
+
+static int ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value);
 
 
-typedef void(*ht_forach_cb)(uint64_t, ht_key_t*, ht_value_t*);
+typedef void(*ht_forach_cb)(uint64_t, ht_key_t *, ht_value_t *);
 
-static int ht_foreach(hashtable_t* ht, ht_forach_cb cb);
+static int ht_foreach(hashtable_t *ht, ht_forach_cb cb);
 
-static int ht_create_key_i(uint64_t keyval, ht_key_t** key)
-{
+static int ht_create_key_i(uint64_t keyval, ht_key_t **key) {
     *key = malloc(sizeof(ht_key_t));
     (*key)->u.i = keyval;
 
     return ST_OK;
 }
 
-static int ht_create_value(void* p, size_t size, ht_value_t** value)
-{
+static int ht_create_value(void *p, size_t size, ht_value_t **value) {
     *value = malloc(sizeof(ht_value_t));
     (*value)->ptr = p;
     (*value)->size = size;
@@ -281,54 +316,58 @@ static int ht_create_value(void* p, size_t size, ht_value_t** value)
 //======================================================================================================================
 
 
-static hashtable_t* alloc_table = NULL;
+static hashtable_t *alloc_table = NULL;
 
-struct _IO_FILE * stdout_orig;
-struct _IO_FILE * stderr_orig;
-struct _IO_FILE * stdtrace;
-static FILE* stdtest;
+struct _IO_FILE *stdout_orig;
+struct _IO_FILE *stderr_orig;
+struct _IO_FILE *stdtrace;
+static FILE *stdtest;
 //static char* stdtest_buf;
 //static size_t stdtest_size;
-static const size_t size_npos = (size_t)-1;
+static const size_t size_npos = (size_t) -1;
 // init gloabls
 
 static void string_init_globals();
 
-static int init_gloabls()
-{
+static int init_gloabls() {
+
+    //disable buffering for stdout
+    //setvbuf(stdout, NULL, _IONBF, 0);
+
+#ifdef ENABLE_LOGGING
     init_log(LOGLEVEL_ALL);
+#endif
 
     stdout_orig = stdout;
     stderr_orig = stderr;
 
-    ht_init(&alloc_table);
+    //ht_init(&alloc_table);
 
     //stdtest = open_memstream(&stdtest_buf, &stdtest_size);
     stdtest = fopen("/dev/null", "w");
     stdtrace = fopen("/dev/null", "w");
 
-    string_init_globals();
+    //string_init_globals();
 
     return 0;
 }
 
 
-static void enable_stdout(bool b)
-{
-    if(b) stdout = stdout_orig;
-    else stdout = stdtest;
+static void enable_stdout(bool b) {
+    if (b) stdout = stdout_orig;
+    else
+        stdout = stdtest;
 }
 
-static void enable_stderr(bool b)
-{
-    if(b) stderr = stderr_orig;
-    else stderr = stdtest;
+static void enable_stderr(bool b) {
+    if (b) stderr = stderr_orig;
+    else
+        stderr = stdtest;
 }
 
 
-static int globals_shutdown()
-{
-    ht_destroy(alloc_table);
+static int globals_shutdown() {
+    //ht_destroy(alloc_table);
     fclose(stdtest);
 
     return ST_OK;
@@ -339,19 +378,17 @@ static int globals_shutdown()
 // blob operations
 //======================================================================================================================
 
-typedef struct
-{
+typedef struct {
     uint64_t id;
     uint64_t ref;
     uint64_t size;
 } object_t;
 
-static void* object_create(size_t size)
-{
-    size_t csize = size+sizeof(object_t);
-    char* ptr = malloc(csize);
+static void *object_create(size_t size) {
+    size_t csize = size + sizeof(object_t);
+    char *ptr = malloc(csize);
     object_t b;
-    b.id = (uint64_t)ptr;
+    b.id = (uint64_t) ptr;
     b.ref = 1;
     b.size = size;
 
@@ -359,58 +396,54 @@ static void* object_create(size_t size)
 
 
     // registration
-    ht_key_t * key = NULL;
-    ht_create_key_i((uint64_t)ptr, &key);
+    ht_key_t *key = NULL;
+    ht_create_key_i((uint64_t) ptr, &key);
 
-    ht_value_t* val = NULL;
+    ht_value_t *val = NULL;
     ht_create_value(ptr, csize, &val);
 
     ht_set(alloc_table, key, val);
     //-------------
 
-    return ptr+sizeof(object_t);
+    return ptr + sizeof(object_t);
 }
 
-static void* object_share(void* a, size_t obj_size)
-{
-    object_t* b = (object_t *) ((char*)a - obj_size);
+static void *object_share(void *a, size_t obj_size) {
+    object_t *b = (object_t *) ((char *) a - obj_size);
     //atomic_fetch_add(&b->ref, 1);
     b->ref++;
     return a;
 }
 
-static void* object_copy(void* a, size_t obj_size)
-{
-    object_t* c = (object_t *) ((char*)a - obj_size);
+static void *object_copy(void *a, size_t obj_size) {
+    object_t *c = (object_t *) ((char *) a - obj_size);
 
-    size_t csize = c->size+sizeof(object_t);
-    uint64_t* ptr = malloc(csize);
+    size_t csize = c->size + sizeof(object_t);
+    uint64_t *ptr = malloc(csize);
     object_t b;
-    b.id = (uint64_t)ptr;
+    b.id = (uint64_t) ptr;
     b.ref = 1;
     b.size = c->size;
 
     memcpy(ptr, &b, sizeof(object_t));
 
     // registration
-    ht_key_t * key = NULL;
-    ht_create_key_i((uint64_t)ptr, &key);
+    ht_key_t *key = NULL;
+    ht_create_key_i((uint64_t) ptr, &key);
 
-    ht_value_t* val = NULL;
+    ht_value_t *val = NULL;
     ht_create_value(ptr, csize, &val);
 
     ht_set(alloc_table, key, val);
     //-------------
 
-    return ptr+sizeof(object_t);
+    return ptr + sizeof(object_t);
 }
 
-static void object_release(void* a, size_t obj_size)
-{
-    object_t* c = (object_t *) ((char*)a - obj_size);
+static void object_release(void *a, size_t obj_size) {
+    object_t *c = (object_t *) ((char *) a - obj_size);
 
-    if(c->ref > 0)
-    {
+    if (c->ref > 0) {
         //atomic_fetch_add(&c->ref, -1);
         c->ref--;
     }
@@ -427,34 +460,31 @@ static void object_release(void* a, size_t obj_size)
 // ALLOCATORS
 //===============================================================
 
-typedef struct alloc_stat
-{
+typedef struct alloc_stat {
     uint64_t size;
 } alloc_stat_t;
 
-static void _record_alloc_set(void* ptr, size_t size)
-{
-    alloc_stat_t* stat = malloc(sizeof(alloc_stat_t));
+static void _record_alloc_set(void *ptr, size_t size) {
+    alloc_stat_t *stat = malloc(sizeof(alloc_stat_t));
     stat->size = size;
 
-    ht_key_t* key = NULL;
-    ht_create_key_i((uint64_t)(uint64_t*)ptr, &key);
+    ht_key_t *key = NULL;
+    ht_create_key_i((uint64_t) (uint64_t *) ptr, &key);
 
-    ht_value_t* val = NULL;
+    ht_value_t *val = NULL;
     ht_create_value(stat, sizeof(struct alloc_stat), &val);
 
 
     ht_set(alloc_table, key, val);
 }
 
-static int _record_alloc_get(void* ptr, alloc_stat_t** stat)
-{
-    ht_value_t* val = NULL;
-    ht_key_t* key = calloc(sizeof(ht_key_t), 1);
+static int _record_alloc_get(void *ptr, alloc_stat_t **stat) {
+    ht_value_t *val = NULL;
+    ht_key_t *key = calloc(sizeof(ht_key_t), 1);
     key->u.i = PTR_TO_U64(ptr);
     int res = ht_get(alloc_table, key, &val);
     free(key);
-    if(res != ST_OK)
+    if (res != ST_OK)
         return res;
 
 
@@ -464,108 +494,85 @@ static int _record_alloc_get(void* ptr, alloc_stat_t** stat)
     return ST_OK;
 }
 
-static void safe_free(void** pp)
-{
-    if(pp && *pp)
-    {
-        void* p = *pp;
-
-        alloc_stat_t *stat = NULL;
-
-        if (_record_alloc_get(p, &stat) == ST_OK) {
-
-            _record_alloc_set(p, 0);
-
-            if(stat->size > 0) {
-                fprintf(stdtrace, "[safe_free] found address: 0x%08lx size: %lu\n", (uint64_t) (uint64_t *) p,
-                        stat->size);
-
-                free(p);
-                *pp = NULL;
-            }
+static void safe_free(void **pp) {
+    if (NULLPP(pp))
+        return;
 
 
-        }
+//    alloc_stat_t *stat = NULL;
+//
+//    if (_record_alloc_get(*pp, &stat) == ST_OK) {
+//
+//        _record_alloc_set(*pp, 0);
+//
+//        if(stat->size > 0) {
+//            LOG_TRACE("found address: 0x%08lx size: %lu", (uint64_t) (uint64_t *) (*pp), stat->size);
+//        }
+//
+//        free(stat);
+//
+//    }
 
-        free(stat);
-    }
+    free(*pp);
+    *pp = NULL;
+
+
 }
 
 
+static void *zalloc(size_t size) {
+    void *v = malloc(size);
+    if (v == NULL) {
+        LOG_ERROR("malloc returns null pointer [size=%lu]. Trying again...", size);
+        return zalloc(size);
+    }
+
+    memset(v, 0, size);
+
+
+    return v;
+
+}
+
+//TODO rework this shit
 //// zeros allocated memory
-static void* allocz(void* dst, size_t size)
-{
+static void *allocz(void *dst, size_t size) {
     size_t asize = size + (size % ALLOC_ALIGN);
     char *v = realloc(dst, asize);
 
-    if(dst) {
-        alloc_stat_t *stat = NULL;
-
-        if (_record_alloc_get(dst, &stat) == ST_OK) {
-            fprintf(stdtrace, "[allocz] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
-                    stat->size, asize);
-
-            if (asize > stat->size) {
-                size_t zsize = asize - stat->size;
-                char *oldp = v + stat->size;
-                memset(oldp, 0, zsize);
-            }
-
-            free(stat);
-        }
-    }
-    else
-    {
+    if (dst == NULL)
         memset(v, 0, asize);
-    }
 
-    _record_alloc_set(v, asize);
+//    if(dst) {
+//        alloc_stat_t *stat = NULL;
+//
+//        if (_record_alloc_get(dst, &stat) == ST_OK) {
+//            LOG_TRACE("found hash: 0x%08lx old_size: %lu new_size: %lu", (uint64_t) (uint64_t *) dst,
+//                    stat->size, asize);
+//
+//            if (asize > stat->size) {
+//                size_t zsize = asize - stat->size;
+//                char *oldp = v + stat->size;
+//                memset(oldp, 0, zsize);
+//            }
+//
+//            free(stat);
+//        }
+//    }
+//    else
+//    {
+//        memset(v, 0, asize);
+//    }
+//
+//    _record_alloc_set(v, asize);
     return v;
 }
 
-
-static void* alloc_strict(void* dst, size_t size)
-{
-    return realloc(dst, size);
-}
-
-
-static void* alloc_zstrict(void* dst, size_t size)
-{
-    size_t asize = size;
-    char *v = realloc(dst, asize);
-
-    if(dst) {
-        alloc_stat_t *stat = NULL;
-
-        if (_record_alloc_get(dst, &stat) == ST_OK) {
-            fprintf(stdtrace, "[alloc_zstrict] found hash: 0x%08lx old_size: %lu new_size: %lu\n", (uint64_t) (uint64_t *) dst,
-                    stat->size, asize);
-
-            if (asize > stat->size) {
-                size_t zsize = asize - stat->size;
-                char *oldp = v + stat->size;
-                memset(oldp, 0, zsize);
-            }
-        }
-    }
-    else
-    {
-        memset(v, 0, asize);
-    }
-
-    _record_alloc_set(v, asize);
-    return v;
-
-}
-
-static void* mmove(void* dst, const void* src, size_t size)
-{
+static void *mmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
 }
 
-static void* mcopy(void* dst, const void* src, size_t size)
-{
+static void *mcopy(void *dst, const void *src, size_t size) {
     return memcpy(dst, src, size);
 }
 
@@ -712,55 +719,49 @@ static uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l) {
 
     for (j = 0; j < l; j++) {
         uint8_t byte = s[j];
-        crc = crc64_tab[(uint8_t)crc ^ byte] ^ (crc >> 8);
+        crc = crc64_tab[(uint8_t) crc ^ byte] ^ (crc >> 8);
     }
     return crc;
 }
 
 
-static uint64_t crc64s(const char* str)
-{
+static uint64_t crc64s(const char *str) {
     uint64_t l = strlen(str);
-    return crc64(0, (const unsigned char*)str, l);
+    return crc64(0, (const unsigned char *) str, l);
 }
 
 //=======================================================================
 // HASH TABLE
 //=======================================================================
 
-static unsigned long ht_hash(const char* _str)
-{
-    const unsigned char* str = (const unsigned char*)_str;
+static unsigned long ht_hash(const char *_str) {
+    const unsigned char *str = (const unsigned char *) _str;
     unsigned long hash = 5381;
     int c;
 
-    while((c = *str++))
+    while ((c = *str++))
         hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
 
     return hash;
 }
 
 
-static int ht_init(hashtable_t** ht)
-{
+static int ht_init(hashtable_t **ht) {
     *ht = calloc(sizeof(hashtable_t), 1);
     return ST_OK;
 }
 
-static void ht_destroy_item(ht_item_t* item)
-{
+static void ht_destroy_item(ht_item_t *item) {
     free(item->key);
     free(item->value->ptr);
     free(item->value);
     free(item);
 }
 
-static void ht_destroy_items_line(ht_item_t* start_item)
-{
-    ht_item_t* next = start_item;
-    ht_item_t* tmp = NULL;
-    while(next)
-    {
+static void ht_destroy_items_line(ht_item_t *start_item) {
+    ht_item_t *next = start_item;
+    ht_item_t *tmp = NULL;
+    while (next) {
         tmp = next;
         next = next->next;
 
@@ -769,9 +770,8 @@ static void ht_destroy_items_line(ht_item_t* start_item)
 }
 
 
-static void ht_destroy(hashtable_t* ht)
-{
-    for(size_t i = 0; i < HASHTABLE_SIZE; ++i) {
+static void ht_destroy(hashtable_t *ht) {
+    for (size_t i = 0; i < HASHTABLE_SIZE; ++i) {
         ht_destroy_items_line(ht->table[i]);
     }
 
@@ -779,11 +779,9 @@ static void ht_destroy(hashtable_t* ht)
 }
 
 
-static int ht_create_item(ht_item_t** pitem, uint64_t name_hash, ht_value_t* value)
-{
-    ht_item_t* item;
-    if((item = calloc(sizeof(ht_item_t), 1)) == NULL)
-    {
+static int ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *value) {
+    ht_item_t *item;
+    if ((item = calloc(sizeof(ht_item_t), 1)) == NULL) {
         fprintf(stderr, "[ht_create_item] can't alloc");
         return ST_ERR;
     }
@@ -797,16 +795,14 @@ static int ht_create_item(ht_item_t** pitem, uint64_t name_hash, ht_value_t* val
 }
 
 
-static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
-{
+static int ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value) {
     uint64_t hash = key->u.i;
-    size_t bin =  hash % HASHTABLE_SIZE;
+    size_t bin = hash % HASHTABLE_SIZE;
 
-    ht_item_t* item = ht->table[bin];
-    ht_item_t* prev = NULL;
-    while(item)
-    {
-        if(item->hash == hash)
+    ht_item_t *item = ht->table[bin];
+    ht_item_t *prev = NULL;
+    while (item) {
+        if (item->hash == hash)
             break;
 
         prev = item;
@@ -814,22 +810,18 @@ static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
     }
 
 
-    if(item && item->hash == hash)
-    {
+    if (item && item->hash == hash) {
         item->value = value;
         free(key);
-    }
-    else
-    {
-        ht_item_t* new_item = NULL;
-        if((ht_create_item(&new_item, hash, value)) != ST_OK)
-        {
+    } else {
+        ht_item_t *new_item = NULL;
+        if ((ht_create_item(&new_item, hash, value)) != ST_OK) {
             return ST_ERR;
         }
 
         new_item->key = key;
 
-        if(prev)
+        if (prev)
             prev->next = new_item;
         else
             ht->table[bin] = new_item;
@@ -837,17 +829,15 @@ static int ht_set(hashtable_t* ht, ht_key_t* key, ht_value_t* value)
 
     return ST_OK;
 }
-static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value)
-{
+
+static int ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value) {
     uint64_t hash = key->u.i;
-    uint64_t bin =  hash % HASHTABLE_SIZE;
+    uint64_t bin = hash % HASHTABLE_SIZE;
 
-    ht_item_t* item = ht->table[bin];
+    ht_item_t *item = ht->table[bin];
 
-    while(item)
-    {
-        if(item->hash == hash)
-        {
+    while (item) {
+        if (item->hash == hash) {
             *value = item->value;
             return ST_OK;
         }
@@ -858,12 +848,10 @@ static int ht_get(hashtable_t* ht, ht_key_t* key, ht_value_t** value)
     return ST_NOT_FOUND;
 }
 
-static int ht_foreach(hashtable_t* ht, ht_forach_cb cb)
-{
-    for(size_t i = 0; i < HASHTABLE_SIZE; ++i) {
-        ht_item_t* next = ht->table[i];
-        while(next)
-        {
+static int ht_foreach(hashtable_t *ht, ht_forach_cb cb) {
+    for (size_t i = 0; i < HASHTABLE_SIZE; ++i) {
+        ht_item_t *next = ht->table[i];
+        while (next) {
             cb(next->hash, next->key, next->value);
             next = next->next;
         }
@@ -876,204 +864,380 @@ static int ht_foreach(hashtable_t* ht, ht_forach_cb cb)
 // DYNAMIC ALLOCATOR
 //=======================================================================
 
+#define DA_TRACE(a) (LOG_TRACE("[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu", \
+a, a->ptr, a->size, a->used, a->mul, size))
 
-typedef struct {
+typedef struct dynamic_allocator {
     char *ptr;
     size_t size;
     size_t used;
     size_t mul;
 
-} dynamic_allocator;
+} dynamic_allocator_t;
 
-static int da_init_n(dynamic_allocator** a, size_t size) {
-    *a  = allocz(NULL, sizeof(dynamic_allocator));
+static int da_init(dynamic_allocator_t **a);
 
-    (*a)->ptr = allocz(NULL, size);
+static int da_realloc(dynamic_allocator_t *a, size_t size) {
+    if (a == NULL) {
+        LOG_WARN("Empty dynamic_allocator::ptr");
+        DA_TRACE(a);
 
+        return da_init(&a);
+    }
 
-    (*a)->size = size;
-    (*a)->mul = 1;
-
-    return ST_OK;
-}
-
-static int da_init(dynamic_allocator** a) {
-
-    return da_init_n(a, STRING_INIT_BUFFER);
-}
-
-static int da_release(dynamic_allocator** a)
-{
-    if(a && *a) {
-
-        safe_free((void**)&(*a)->ptr);
-        safe_free((void**)a);
+    if (a->size == size) {
+        return ST_OK;
+    } else if (size < a->size || size == 0) {
+        size_t ds = a->size - size;
+        memset(a->ptr + size, 0, ds);
+        a->ptr = realloc(a->ptr, size);
+        a->size = size;
+        a->used = size;
+        a->mul = 1;
+    } else if (size > a->size) {
+        size_t ds = size - a->size;
+        a->ptr = realloc(a->ptr, size);
+        memset(a->ptr+a->size, 0, ds);
+        a->size = size;
     }
 
     return ST_OK;
 }
 
-static int da_reallocate(dynamic_allocator *a, size_t size) {
-    a->size += size * a->mul++;
-    a->ptr = allocz(a->ptr, a->size);
+static int da_init_n(dynamic_allocator_t **a, size_t size) {
+    *a = zalloc(sizeof(dynamic_allocator_t));
+
+    (*a)->ptr = zalloc(size);
+    (*a)->size = size;
+    (*a)->mul = 1;
+
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              (*a), (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
+
+    return ST_OK;
+}
+
+static int da_init(dynamic_allocator_t **a) {
+
+    return da_init_n(a, STRING_INIT_BUFFER);
+}
+
+static int da_release(dynamic_allocator_t **a) {
+    if (NULLPP(a))
+        return ST_EMPTY;
+
+    if (*a) {
+        LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
+                  (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
+
+        safe_free((void **) &(*a)->ptr);
+        safe_free((void **) a);
+    }
+
+    return ST_OK;
+}
+
+static int da_fit(dynamic_allocator_t *a) {
+
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+
+    da_realloc(a, a->used);
+
+
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
 
     return 0;
 }
 
-static int da_crop_tail(dynamic_allocator* a, size_t pos)
-{
-    //TODO make faster
-    a->size = a->used-pos;
-    char* newbuff = allocz(NULL, a->size);
+static int da_crop_tail(dynamic_allocator_t *a, size_t pos) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
+              a, a->ptr, a->size, a->used, a->mul, pos);
+
+    if (pos > a->size) {
+        LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
+                 a, a->ptr, a->size, a->used, a->mul, pos);
+
+        return ST_OUT_OF_RANGE;
+    }
+
+    a->size = a->used - pos;
+    char *newbuff = zalloc(a->size);
     memcpy(newbuff, &a->ptr[pos], a->size);
     free(a->ptr);
     a->ptr = newbuff;
     a->used = a->size;
+
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
     return ST_OK;
 }
 
-static int da_shink(dynamic_allocator *a, bool strict) {
-    if(strict)
-        a->ptr = alloc_zstrict(a->ptr, a->used);
-    else
-        a->ptr = allocz(a->ptr, a->used);
-    a->size = a->used;
+static int da_pop_head(dynamic_allocator_t *a, size_t n) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; n=%lu",
+              a, a->ptr, a->size, a->used, a->mul, n);
 
-    return 0;
+    da_fit(a);
+    if (n > a->size) {
+        LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
+                 a, a->ptr, a->size, a->used, a->mul, n);
+
+        return ST_OUT_OF_RANGE;
+    }
+
+    da_realloc(a, a->size - n);
+
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+    return ST_OK;
 }
 
-static int da_check_size(dynamic_allocator *a, size_t new_size) {
+static int da_check_size(dynamic_allocator_t *a, size_t new_size) {
     if (a->size < a->used + new_size)
-        da_reallocate(a, new_size);
+        da_realloc(a, a->used + new_size);
 
     return 0;
 }
 
-static int da_append(dynamic_allocator *a, const char *data, size_t size) {
+static int da_append(dynamic_allocator_t *a, const char *data, size_t size) {
+
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+    LOG_TRACE("input data=0x%08lX size=%lu", data, size);
+
     da_check_size(a, size);
 
     mcopy(a->ptr + a->used, data, size);
     a->used += size;
 
+
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
     return ST_OK;
 }
 
-static int da_sub(dynamic_allocator* a, size_t pos, dynamic_allocator** b)
-{
-    if(pos > a->used)
+static int da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; input begin=%lu end=%lu",
+              a, a->ptr, a->size, a->used, a->mul, begin, end);
+
+    size_t ssize = end - begin + 1;
+    if (ssize > a->used) {
+
+        LOG_WARN("a=[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu and end=%lu out of range",
+                 a, a->ptr, a->size, a->used, a->mul, begin, end);
+
         return ST_OUT_OF_RANGE;
+    }
 
-    size_t b_size = a->used - pos;
-    da_init_n(b, b_size);
-    da_append(*b, a->ptr+pos, b_size);
+    da_init_n(b, ssize);
+    da_append(*b, a->ptr + begin - 1, ssize);
 
-    a->used -= b_size;
-    da_shink(a, true);
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+    LOG_TRACE("e b[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
 
     return ST_OK;
 
 }
 
-static int da_dub(dynamic_allocator* a, dynamic_allocator** b)
-{
+static int da_sub(dynamic_allocator_t *a, size_t pos, dynamic_allocator_t **b) {
+    return da_sub2(a, pos, a->used, b);
+}
+
+
+static int da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
     size_t b_size = a->used;
     da_init_n(b, b_size);
     da_append(*b, a->ptr, b_size);
 
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
+
     return ST_OK;
 }
 
-static int da_merge(dynamic_allocator *a, dynamic_allocator *b) {
-    da_shink(a, true);
-    da_shink(b, true);
+static int da_merge(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
+    LOG_TRACE("b b[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              b, b->ptr, b->size, b->used, b->mul);
+
+    da_fit(a);
+    da_fit(b);
 
     size_t nb_size = a->size + b->size;
 
-    da_reallocate(a, nb_size);
+    da_realloc(a, nb_size);
 
-    mcopy(a->ptr+a->used, b->ptr, b->size);
+    mcopy(a->ptr + a->used, b->ptr, b->size);
 
     a->used += b->size;
 
     da_release(&b);
 
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
     return ST_OK;
 }
 
-static int da_remove_seq(dynamic_allocator* a, size_t pos, size_t n)
-{
-    dynamic_allocator* b = NULL;
+static int da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu n=%lu",
+              a, a->ptr, a->size, a->used, a->mul, n);
 
-    da_sub(a, pos-n, &b);
 
-    da_crop_tail(b, n-1);
+    if (pos + n > a->used) {
+        LOG_WARN("pos(%lu) + n(%lu) >= total used(%lu) bytes", pos, n, a->used);
+        return ST_SIZE_EXCEED;
+    }
+
+    dynamic_allocator_t *b = NULL;
+
+    da_sub(a, pos + n, &b);
+
+    da_realloc(a, pos - 1);
 
     da_merge(a, b);
 
+    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
+              a, a->ptr, a->size, a->used, a->mul);
+
     return ST_OK;
 
+}
+
+static int da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+    return memcmp(a->ptr, b->ptr, MIN(a->used, b->used));
+}
+
+static void test_dynamic_allocator() {
+    dynamic_allocator_t *da = NULL;
+    dynamic_allocator_t *db = NULL;
+    dynamic_allocator_t *dc = NULL;
+    dynamic_allocator_t *dd = NULL;
+    dynamic_allocator_t *de = NULL;
+    dynamic_allocator_t *df = NULL;
+
+    da_init(&da);
+
+    // 0    H
+    // 2    e
+    // 3    l
+    // 4    l
+    // 5    o
+    // 6    ,
+    // 7
+    // 8    S
+    // 9    w
+    // 10   e
+    // 11   e
+    // 12   t
+    // 13
+    // 14   M
+    // 15   a
+    // 16   r
+    // 17   i
+    // 18   a
+    // 19   !
+    char const *str1 = "Hello, Sweet Maria!";
+    da_append(da, str1, strlen(str1));
+
+    da_sub2(da, 14, 19, &db);
+    da_sub(da, 14, &dc);
+
+    ASSERT(da_compare(db, db) == 0);
+
+    da_init(&de);
+    da_append(de, "My ", 3);
+    da_sub2(da, 8, 12, &df);
+    da_append(df, "!", 1);
+
+    da_remove_seq(da, 8, 6);
+
+    da_merge(de, df);
+
+    da_append(de, " ", 1);
+
+    da_merge(da, de);
+
+
+    da_release(&da);
+    ASSERT(NULL == da);
+    da_release(&db);
+    ASSERT(NULL == db);
+    da_release(&dc);
+    ASSERT(NULL == dc);
+    da_release(&dd);
+    ASSERT(NULL == dd);
 }
 
 //=======================================================================
 // GENERIC LIST
 //=======================================================================
 
-typedef struct list_node
-{
-    void* data;
-    struct list_node* prev;
-    struct list_node* next;
+typedef struct list_node {
+    void *data;
+    struct list_node *prev;
+    struct list_node *next;
 
 } list_node_t;
 
-typedef struct list
-{
-    list_node_t* head;
-    list_node_t* tail;
+typedef struct list {
+    list_node_t *head;
+    list_node_t *tail;
     size_t size;
     size_t elem_size;
 
 } list_t;
 
 
-static void list_init(list_t** l, size_t elem_size)
-{
+static void list_init(list_t **l, size_t elem_size) {
     *l = allocz(NULL, sizeof(list_t));
     (*l)->elem_size = elem_size;
 }
 
-static void node_init(list_node_t** node)
-{
-    *node = allocz(NULL ,sizeof(list_node_t));
+static void node_init(list_node_t **node) {
+    *node = allocz(NULL, sizeof(list_node_t));
 }
 
-static void* list_dub_data(list_t* l, void* data)
-{
-    void* v = allocz(NULL, l->elem_size);
+static void *list_dub_data(list_t *l, void *data) {
+    void *v = allocz(NULL, l->elem_size);
     memcpy(v, data, l->elem_size);
     return v;
 }
 
-static void node_append(list_t* l, bool tail, list_node_t* node, list_node_t* prev, void* data)
-{
-    if(!node)
+static void node_append(list_t *l, bool tail, list_node_t *node, list_node_t *prev, void *data) {
+    if (!node)
         node_init(&node);
 
-    if(node->data == NULL)
-    {
+    if (node->data == NULL) {
         node->data = list_dub_data(l, data);
         node->prev = prev;
 
-        if(prev)
-        {
-            if(tail)
+        if (prev) {
+            if (tail)
                 prev->next = node;
             else
                 prev->prev = node;
         }
 
         l->size++;
-        if(tail)
+        if (tail)
             l->tail = node;
         else
             l->head = node;
@@ -1084,77 +1248,70 @@ static void node_append(list_t* l, bool tail, list_node_t* node, list_node_t* pr
 
 }
 
-static void list_append_tail(list_t* l, void* s)
-{
-    if(!l->head)
+static void list_append_tail(list_t *l, void *s) {
+    if (!l->head)
         node_init(&l->head);
 
-    if(!l->tail)
+    if (!l->tail)
         node_init(&l->tail);
 
     node_append(l, true, l->head, NULL, s);
 
 }
 
-static void list_append_head(list_t* l, void* s)
-{
-    if(!l->head)
+static void list_append_head(list_t *l, void *s) {
+    if (!l->head)
         node_init(&l->head);
 
-    if(!l->tail)
+    if (!l->tail)
         node_init(&l->tail);
 
     node_append(l, false, l->head, NULL, s);
 
 }
 
-static void* list_pop_head(list_t* l)
-{
-    if(l->size == 0)
+static void *list_pop_head(list_t *l) {
+    if (l->size == 0)
         return NULL;
 
-    list_node_t* tmp = l->head;
+    list_node_t *tmp = l->head;
     l->head = tmp->prev;
     l->size--;
 
-    void* data = tmp->data;
-    safe_free((void**)&tmp);
+    void *data = tmp->data;
+    safe_free((void **) &tmp);
 
     return data;
 }
 
-static void* list_crop_tail(list_t* l)
-{
-    if(l->size == 0)
+static void *list_crop_tail(list_t *l) {
+    if (l->size == 0)
         return NULL;
 
-    list_node_t* tmp = l->tail;
+    list_node_t *tmp = l->tail;
     l->tail = tmp->next;
     l->size--;
 
-    void* data = tmp->data;
-    safe_free((void**)&tmp);
+    void *data = tmp->data;
+    safe_free((void **) &tmp);
 
     return data;
 }
 
-static list_node_t* list_next(list_node_t* node)
-{
-    if(!node) return NULL;
+static list_node_t *list_next(list_node_t *node) {
+    if (!node) return NULL;
 
     return node->next;
 }
 
-static list_node_t* list_prev(list_node_t* node)
-{
-    if(!node) return NULL;
+static list_node_t *list_prev(list_node_t *node) {
+    if (!node) return NULL;
 
     return node->prev;
 }
 
-static int list_release(list_t** l)
-{
-    if(NULLPP(l) && *l == NULL)
+static int list_release(list_t **l) {
+    if (NULLPP(l) && *l == NULL)
         return ST_EMPTY;
 
 
@@ -1167,7 +1324,7 @@ static int list_release(list_t** l)
         safe_free((void **) &tmp);
     }
 
-    safe_free((void **)l);
+    safe_free((void **) l);
     *l = NULL;
 
 
@@ -1175,30 +1332,26 @@ static int list_release(list_t** l)
 
 }
 
-static int list_merge(list_t* a, list_t* b)
-{
-    if(a->size == 0 && b->size == 0)
+static int list_merge(list_t *a, list_t *b) {
+    if (a->size == 0 && b->size == 0)
         return ST_ERR;
 
 
     a->tail->next = b->head;
     b->head->prev = a->tail;
-    a->size+= b->size;
+    a->size += b->size;
     a->tail = b->tail;
 
     return ST_OK;
 }
 
-static int list_remove(list_t* l, void* data)
-{
-    list_node_t* head = l->head;
+static int list_remove(list_t *l, void *data) {
+    list_node_t *head = l->head;
 
-    while(head)
-    {
-        if(head->data == data)
-        {
-            list_node_t* hn = head->next;
-            list_node_t* hp = head->prev;
+    while (head) {
+        if (head->data == data) {
+            list_node_t *hn = head->next;
+            list_node_t *hp = head->prev;
 
             hn->prev = hp;
             hp->next = hn;
@@ -1215,20 +1368,18 @@ static int list_remove(list_t* l, void* data)
     return ST_NOT_FOUND;
 }
 
-typedef void(*list_traverse_cb)(list_node_t*);
+typedef void(*list_traverse_cb)(list_node_t *);
 
 
-static int list_traverse(list_t* l, bool forward, list_traverse_cb cb)
-{
-    if(!l) return ST_EMPTY;
+static int list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
+    if (!l) return ST_EMPTY;
 
 
-    list_node_t* cur = forward? l->tail : l->head;
+    list_node_t *cur = forward ? l->tail : l->head;
 
-    while(cur)
-    {
+    while (cur) {
         cb(cur);
-        cur = forward? cur->next : cur->prev;
+        cur = forward ? cur->next : cur->prev;
     }
 
     return ST_OK;
@@ -1237,15 +1388,13 @@ static int list_traverse(list_t* l, bool forward, list_traverse_cb cb)
 //=======================================================================
 // GENERIC VECTOR
 //=======================================================================
-typedef struct vector
-{
-    dynamic_allocator* alloc;
+typedef struct vector {
+    dynamic_allocator_t *alloc;
     size_t size;
     size_t elem_size;
 } vector_t;
 
-static int vector_init(vector_t** vec, size_t elem_size)
-{
+static int vector_init(vector_t **vec, size_t elem_size) {
     *vec = allocz(NULL, sizeof(vector_t));
     da_init_n(&(*vec)->alloc, elem_size * 10);
     (*vec)->elem_size = elem_size;
@@ -1253,41 +1402,37 @@ static int vector_init(vector_t** vec, size_t elem_size)
     return ST_OK;
 }
 
-static int vector_release(vector_t* vec)
-{
+static int vector_release(vector_t *vec) {
     da_release(&vec->alloc);
     free(vec);
 
     return ST_OK;
 }
 
-static size_t vector_size(vector_t* vec) { return vec->size; }
+static size_t vector_size(vector_t *vec) { return vec->size; }
 
-static int vector_add(vector_t* vec, const void* elem)
-{
-    da_append(vec->alloc, (const char*)elem, vec->elem_size);
+static int vector_add(vector_t *vec, const void *elem) {
+    da_append(vec->alloc, (const char *) elem, vec->elem_size);
     vec->size++;
 
     return ST_OK;
 }
 
 
-static int vector_get(vector_t* vec, size_t idx, void** elem)
-{
-    if(idx >= vec->size)
+static int vector_get(vector_t *vec, size_t idx, void **elem) {
+    if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
-    *elem = (void*)&(vec->alloc->ptr[vec->elem_size*idx]);
+    *elem = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
 
     return ST_OK;
 }
 
-static int vector_set(vector_t* vec, size_t idx, void* elem)
-{
-    if(idx >= vec->size)
+static int vector_set(vector_t *vec, size_t idx, void *elem) {
+    if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
-    void* el = (void*)&(vec->alloc->ptr[vec->elem_size*idx]);
+    void *el = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
 
     memcpy(el, elem, vec->elem_size);
 
@@ -1295,14 +1440,12 @@ static int vector_set(vector_t* vec, size_t idx, void* elem)
 
 }
 
-typedef void(*vector_foreach_cb)(size_t,size_t, void*, void*);
+typedef void(*vector_foreach_cb)(size_t, size_t, void *, void *);
 
-static void vector_foreach(vector_t* vec, void* ctx, vector_foreach_cb cb)
-{
+static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
     size_t n = vec->size;
-    for(size_t i = 0; i < n; ++i)
-    {
-        void* v = (void*)&(vec->alloc->ptr[vec->elem_size*i]);
+    for (size_t i = 0; i < n; ++i) {
+        void *v = (void *) &(vec->alloc->ptr[vec->elem_size * i]);
         cb(i, vec->elem_size, ctx, v);
     }
 }
@@ -1313,20 +1456,19 @@ static void vector_foreach(vector_t* vec, void* ctx, vector_foreach_cb cb)
 //=======================================================================
 
 typedef struct {
-    dynamic_allocator* alloc;
+    dynamic_allocator_t *alloc;
     size_t size;
     uint64_t nt;
 } string;
 
-typedef struct skey_value
-{
-    string* key;
-    string* value;
+typedef struct skey_value {
+    string *key;
+    string *value;
 } skey_value_t;
 
-static string* string_null = NULL;
+static string *string_null = NULL;
 
-static int string_init(string** sp) {
+static int string_init(string **sp) {
     *sp = allocz(NULL, sizeof(string));
     da_init(&((*sp)->alloc));
     (*sp)->size = 0;
@@ -1335,20 +1477,18 @@ static int string_init(string** sp) {
     return ST_OK;
 }
 
-static int string_release(string** s)
-{
-    if(s && *s) {
+static int string_release(string **s) {
+    if (s && *s) {
         da_release(&(*s)->alloc);
 
-        safe_free((void**)s);
+        safe_free((void **) s);
 
     }
 
     return ST_OK;
 }
 
-static int string_dub(string* s, string** ns)
-{
+static int string_dub(string *s, string **ns) {
     *ns = allocz(NULL, sizeof(string));
     da_dub(s->alloc, &(*ns)->alloc);
 
@@ -1379,10 +1519,9 @@ static int string_appendz(string *s, const char *str) {
 
 }
 
-static void string_init_globals()
-{
+static void string_init_globals() {
     string_init(&string_null);
-    string_appendz(string_null,"(null)");
+    string_appendz(string_null, "(null)");
 }
 
 
@@ -1421,10 +1560,11 @@ static int string_createz(string **s, const char *str) {
     return ST_OK;
 }
 
-static char string_get_ch(string* s, size_t idx)
-{
-    if(idx > s->size)
-        EXIT_ERROR("Index is out of bound");
+static char string_get_ch(string *s, size_t idx) {
+    if (idx > s->size) {
+        LOG_ERROR("Index is out of bound %lu > %lu", idx, s->size);
+        return 0;
+    }
 
     return s->alloc->ptr[idx];
 }
@@ -1436,12 +1576,11 @@ static int string_add(string *a, string *b) {
     return ST_OK;
 }
 
-static int string_pop_head(string* s)
-{
-    if(s && s->alloc && s->alloc->ptr && s->size > 2) {
+static int string_pop_head(string *s) {
+    if (s && s->alloc && s->alloc->ptr && s->size > 2) {
         --s->alloc->used;
         --s->size;
-        da_shink(s->alloc, true);
+        da_fit(s->alloc);
 
         if (s->nt)
             s->alloc->ptr[s->alloc->size - 1] = '\0';
@@ -1452,19 +1591,16 @@ static int string_pop_head(string* s)
     return ST_ERR;
 }
 
-static int string_crop_tail(string* s)
-{
+static int string_crop_tail(string *s) {
     da_crop_tail(s->alloc, 1);
 
     return ST_OK;
 }
 
-static size_t string_find_last_char(string* s, char ch)
-{
-    for(size_t i = s->size; i != 0; --i)
-    {
+static size_t string_find_last_char(string *s, char ch) {
+    for (size_t i = s->size; i != 0; --i) {
         char cur = s->alloc->ptr[i];
-        if(cur == ch)
+        if (cur == ch)
             return i;
     }
 
@@ -1472,24 +1608,22 @@ static size_t string_find_last_char(string* s, char ch)
 
 }
 
-static int string_starts_withz(string* s, const char* str)
-{
+static int string_starts_withz(string *s, const char *str) {
     size_t str_len = strlen(str);
-    if(str_len > s->size)
+    if (str_len > s->size)
         return ST_SIZE_EXCEED;
 
-    if(memcmp(s->alloc->ptr, str, str_len) == 0)
+    if (memcmp(s->alloc->ptr, str, str_len) == 0)
         return ST_OK;
 
     return ST_NOT_FOUND;
 }
 
-static int string_compare(string* a, string* b)
-{
-    if(a->size != b->size)
+static int string_compare(string *a, string *b) {
+    if (a->size != b->size)
         return ST_NOT_FOUND;
 
-    if(memcmp(a->alloc->ptr, b->alloc->ptr, a->size) == 0)
+    if (memcmp(a->alloc->ptr, b->alloc->ptr, a->size) == 0)
         return ST_OK;
 
 
@@ -1497,27 +1631,22 @@ static int string_compare(string* a, string* b)
 }
 
 
-static int string_comparez(string* a, const char* cmp)
-{
+static int string_comparez(string *a, const char *cmp) {
     return strncmp(a->alloc->ptr, cmp, strlen(cmp));
 }
 
-static void string_map_region(string* s, size_t beg, size_t end, char** sb, char** se)
-{
-    if((beg > 0 && beg <= s->size) && (end > 0 && end <= s->size))
-        EXIT_ERROR("Indexes are out of bound");
+static void string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
+    if ((beg > 0 && beg <= s->size) && (end > 0 && end <= s->size)) EXIT_ERROR("Indexes are out of bound");
 
     *sb = s->alloc->ptr + beg;
     *se = s->alloc->ptr + end;
 }
 
-static void string_map_string(string* s, char** sb, char** se)
-{
+static void string_map_string(string *s, char **sb, char **se) {
     string_map_region(s, 0, s->size, sb, se);
 }
 
-static int string_to_u64(string* s, uint64_t* ul)
-{
+static int string_to_u64(string *s, uint64_t *ul) {
 
     uint64_t res = 0;
 
@@ -1530,64 +1659,53 @@ static int string_to_u64(string* s, uint64_t* ul)
 
 }
 
-static void string_fprint(string *a, FILE* output) {
-    //printf("%.*s", a->size, a->alloc.ptr);
-    fwrite(a->alloc->ptr, 1, a->size, output);
-    fwrite("\n", 1, 1, output);
-    fflush(output);
-}
+#define string_print(a) LOG_INFO("%.*s",a->size, a->alloc->ptr);
+#define string_printd(a) LOG_DEBUG("%.*s",a->size, a->alloc->ptr);
 
 //=======================================================================
 // SLIST
 //=======================================================================
 
-typedef struct snode
-{
-    string* s;
-    struct snode* prev;
-    struct snode* next;
+typedef struct snode {
+    string *s;
+    struct snode *prev;
+    struct snode *next;
 
 } snode;
 
-typedef struct
-{
-    snode* head;
-    snode* tail;
+typedef struct {
+    snode *head;
+    snode *tail;
     size_t size;
-    snode* cur;
+    snode *cur;
     char delm;
 
 } slist;
 
 
-static void slist_init(slist** sl)
-{
+static void slist_init(slist **sl) {
     *sl = allocz(NULL, sizeof(slist));
     (*sl)->delm = ',';
 }
 
-static void snode_init(snode** node)
-{
-    *node = allocz(NULL ,sizeof(snode));
+static void snode_init(snode **node) {
+    *node = allocz(NULL, sizeof(snode));
 }
 
 
-static void slist_set_delm(slist* sl, char delm)
-{
+static void slist_set_delm(slist *sl, char delm) {
     sl->delm = delm;
 }
 
-static void snode_append(slist* sl, snode* node, snode* prev, string* s)
-{
-    if(!node)
+static void snode_append(slist *sl, snode *node, snode *prev, string *s) {
+    if (!node)
         snode_init(&node);
 
-    if(node->s == NULL)
-    {
+    if (node->s == NULL) {
         node->s = s;
         node->prev = prev;
 
-        if(prev) prev->next = node;
+        if (prev) prev->next = node;
 
         sl->size++;
         sl->tail = node;
@@ -1598,56 +1716,49 @@ static void snode_append(slist* sl, snode* node, snode* prev, string* s)
 
 }
 
-static void slist_append(slist* sl, string* s)
-{
-    if(!sl->head)
+static void slist_append(slist *sl, string *s) {
+    if (!sl->head)
         snode_init(&sl->head);
 
-    if(!sl->tail)
+    if (!sl->tail)
         snode_init(&sl->tail);
 
     snode_append(sl, sl->head, NULL, s);
 
 }
 
-static string* slist_pop_head(slist* sl)
-{
-    if(sl->size == 0)
-        EXIT_ERROR("Empty list");
+static string *slist_pop_head(slist *sl) {
+    if (sl->size == 0) EXIT_ERROR("Empty list");
 
-    snode* tmp = sl->head;
+    snode *tmp = sl->head;
     sl->head = tmp->prev;
     sl->size--;
 
-    string* s = tmp->s;
+    string *s = tmp->s;
     free(tmp);
 
     return s;
 }
 
-static void slist_init_current(slist* sl)
-{
-    if(sl->size == 0)
-        EXIT_ERROR("Empty list");
+static void slist_init_current(slist *sl) {
+    if (sl->size == 0) EXIT_ERROR("Empty list");
 
     sl->cur = sl->head;
 }
 
-static string* slist_next(slist* sl)
-{
-    if(sl->cur == NULL)
+static string *slist_next(slist *sl) {
+    if (sl->cur == NULL)
         return NULL;
 
-    string* s = sl->cur->s;
+    string *s = sl->cur->s;
 
     sl->cur = sl->cur->next;
 
     return s;
 }
 
-static int slist_release(slist** sl, bool srelease)
-{
-    if(sl && *sl) {
+static int slist_release(slist **sl, bool srelease) {
+    if (sl && *sl) {
         snode *head = (*sl)->head;
         while (head) {
             if (srelease)
@@ -1666,28 +1777,23 @@ static int slist_release(slist** sl, bool srelease)
 
 }
 
-static void slist_merge(slist* a, slist* b)
-{
-    if(a->size == 0 && b->size == 0)
-        EXIT_ERROR("lists must contain at least one element");
+static void slist_merge(slist *a, slist *b) {
+    if (a->size == 0 && b->size == 0) EXIT_ERROR("lists must contain at least one element");
 
 
     a->tail->next = b->head;
     b->head->prev = a->tail;
-    a->size+= b->size;
+    a->size += b->size;
     a->tail = b->tail;
 }
 
-static void slist_remove(slist* sl, string* s)
-{
-    snode* head = sl->head;
+static void slist_remove(slist *sl, string *s) {
+    snode *head = sl->head;
 
-    while(head)
-    {
-        if(head->s == s)
-        {
-            snode* hn = head->next;
-            snode* hp = head->prev;
+    while (head) {
+        if (head->s == s) {
+            snode *hn = head->next;
+            snode *hp = head->prev;
 
             hn->prev = hp;
             hp->next = hn;
@@ -1702,13 +1808,11 @@ static void slist_remove(slist* sl, string* s)
     }
 }
 
-static int slist_find_eq(slist* sl, string* s, string** found)
-{
-    snode* head = sl->head;
+static int slist_find_eq(slist *sl, string *s, string **found) {
+    snode *head = sl->head;
 
-    while(head)
-    {
-        if(string_compare(head->s, s) == ST_OK) {
+    while (head) {
+        if (string_compare(head->s, s) == ST_OK) {
             *found = head->s;
             return ST_OK;
         }
@@ -1719,56 +1823,58 @@ static int slist_find_eq(slist* sl, string* s, string** found)
     return ST_NOT_FOUND;
 }
 
-static void slist_fprint(slist* sl, FILE* output)
-{
-    snode* head = sl->head;
-    while(head)
-    {
-        string_fprint(head->s, output);
+static void slist_fprint(slist *sl, FILE *output) {
+    snode *head = sl->head;
+    while (head) {
+
+#ifdef NDEBUG
+        string_print(head->s);
+#else
+        string_printd(head->s);
+#endif
+
         head = head->next;
     }
 }
 
-static void slist_rfprint(slist* sl, FILE* output)
-{
-    snode* tail = sl->tail;
+static void slist_rfprint(slist *sl, FILE *output) {
+    snode *tail = sl->tail;
 
-    while(tail)
-    {
-
-        string_fprint(tail->s, output);
+    while (tail) {
+#ifdef NDEBUG
+        string_print(tail->s);
+#else
+        string_printd(tail->s);
+#endif
         tail = tail->prev;
     }
 }
 
-static int string_remove_seq(string* s, size_t pos, size_t n)
-{
+static int string_remove_seq(string *s, size_t pos, size_t n) {
     da_remove_seq(s->alloc, pos, n);
     s->size = s->alloc->used;
 
     return ST_OK;
 }
 
-static int string_remove_dubseq(string* s, char delm)
-{
+static int string_remove_dubseq(string *s, char delm) {
     size_t j = 0;
-    while(j < s->size) {
+    while (j < s->size) {
         char *cur = s->alloc->ptr;
         size_t i = 0;
         size_t n = 0;
 
-        while (cur[j+(i++)] == delm) ++n;
+        while (cur[j + (i++)] == delm) ++n;
 
 
-
-        if(n > 1) {
-            string_remove_seq(s, j+i, n);
+        if (n > 1) {
+            string_remove_seq(s, j + i, n);
             j = 0; // skip due to internal buffer changed
         }
 
         ++j;
 
-        if( j >= s->size)
+        if (j >= s->size)
             break;
 
     }
@@ -1776,26 +1882,23 @@ static int string_remove_dubseq(string* s, char delm)
     return ST_OK;
 }
 
-static const char strip_dict[] = { '\0', '\n', '\r', '\t', ' ', '"', '\"', '\'' };
-static const char strip_dict_ws[] = { '\0', '\n', '\r', '\t', ' '};
+static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
+static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
 
-static bool check_strip_dict(char ch)
-{
-    for(size_t i = 0; i < sizeof(strip_dict)/sizeof(char); ++i)
-        if(ch == strip_dict[i])
+static bool check_strip_dict(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
+        if (ch == strip_dict[i])
             return true;
 
     return false;
 }
 
-static int string_rstrip(string* s)
-{
-    while(s->size > 0)
-    {
+static int string_rstrip(string *s) {
+    while (s->size > 0) {
         size_t idx = s->size - 1;
         char sch = string_get_ch(s, idx);
 
-        if(check_strip_dict(sch))
+        if (check_strip_dict(sch))
             string_pop_head(s);
         else
             return ST_OK;
@@ -1805,12 +1908,11 @@ static int string_rstrip(string* s)
     return ST_OK;
 }
 
-static int string_lstrip(string* s)
-{
-    for(size_t j = 0; j < s->size; ++j) {
+static int string_lstrip(string *s) {
+    for (size_t j = 0; j < s->size; ++j) {
 
         char sch = string_get_ch(s, j);
-        if(check_strip_dict(sch))
+        if (check_strip_dict(sch))
             string_crop_tail(s);
         else
             return ST_OK;
@@ -1818,9 +1920,9 @@ static int string_lstrip(string* s)
     return ST_OK;
 }
 
-static int string_strip(string* s) {
+static int string_strip(string *s) {
 
-    if(s->size < 3)
+    if (s->size < 3)
         return ST_SIZE_EXCEED;
 
     string_rstrip(s);
@@ -1829,29 +1931,25 @@ static int string_strip(string* s) {
     return ST_OK;
 }
 
-static bool check_strip_dict_ws(char ch)
-{
-    for(size_t i = 0; i < sizeof(strip_dict_ws)/sizeof(char); ++i)
-        if(ch == strip_dict_ws[i])
+static bool check_strip_dict_ws(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
+        if (ch == strip_dict_ws[i])
             return true;
 
     return false;
 }
 
-static int string_rstrip_ws(string* s)
-{
-    while(s->size > 2)
-    {
+static int string_rstrip_ws(string *s) {
+    while (s->size > 2) {
 
         size_t idx = s->size - 1;
         char sch = string_get_ch(s, idx);
 
         uint64_t nt = s->nt;
-        if(check_strip_dict_ws(sch)) {
+        if (check_strip_dict_ws(sch)) {
             s->nt = 0;
             string_pop_head(s);
-        }
-        else {
+        } else {
             s->nt = nt;
             return ST_OK;
         }
@@ -1861,9 +1959,8 @@ static int string_rstrip_ws(string* s)
     return ST_OK;
 }
 
-static int string_split(string* s, char delm, slist** sl)
-{
-    if(s->size == 0)
+static int string_split(string *s, char delm, slist **sl) {
+    if (s->size == 0)
         return ST_EMPTY;
 
 
@@ -1871,23 +1968,21 @@ static int string_split(string* s, char delm, slist** sl)
     string_remove_dubseq(s, delm);
 
     slist_init(sl);
-    char* cb = NULL;
-    char* end = NULL;
+    char *cb = NULL;
+    char *end = NULL;
 
 
     string_map_string(s, &cb, &end);
-    char* ccur = cb;
+    char *ccur = cb;
 
-    while(ccur  <= end)
-    {
-        if(*ccur == delm || ccur == end)
-        {
+    while (ccur <= end) {
+        if (*ccur == delm || ccur == end) {
             //while(*(++ccur) == delm && ccur == end);
 
 
-            string* ss = NULL;
+            string *ss = NULL;
             string_init(&ss);
-            string_appendnz(ss, cb, (size_t)(ccur-cb));
+            string_appendnz(ss, cb, (size_t) (ccur - cb));
 
             slist_append(*sl, ss);
 
@@ -1904,21 +1999,19 @@ static int string_split(string* s, char delm, slist** sl)
 // HASH BINARY TREE
 //=============================================================================================
 
-typedef struct bt_node
-{
+typedef struct bt_node {
     uint64_t hash_key;
-    void* data;
+    void *data;
     size_t size;
-    struct bt_node* prev;
-    struct bt_node* left;
-    struct bt_node* right;
+    struct bt_node *prev;
+    struct bt_node *left;
+    struct bt_node *right;
 
 } bt_node_t;
 
-static int bt_node_create(bt_node_t** bt, uint64_t hash, void* data, size_t size)
-{
+static int bt_node_create(bt_node_t **bt, uint64_t hash, void *data, size_t size) {
     *bt = allocz(NULL, sizeof(bt_node_t));
-    bt_node_t* b = *bt;
+    bt_node_t *b = *bt;
     b->hash_key = hash;
 
     b->data = allocz(NULL, size);
@@ -1929,25 +2022,27 @@ static int bt_node_create(bt_node_t** bt, uint64_t hash, void* data, size_t size
 
 static int bt_node_release(bt_node_t **bt) {
 
-    if (NULLPP(bt) || *bt == NULL)
+    if (NULLPP(bt))
         return ST_EMPTY;
 
-    bt_node_t *b = *bt;
-    SAFE_RELEASE(b->data);
+    if (*bt != NULL) {
 
-    bt_node_release(&b->left);
-    bt_node_release(&b->right);
+        bt_node_release(&(*bt)->left);
+        bt_node_release(&(*bt)->right);
+
+        safe_free(&(*bt)->data);
+        safe_free((void **) bt);
+
+    }
 
     return ST_OK;
 }
 
 
-static int bt_node_set(bt_node_t** bt, bt_node_t* prev, uint64_t hash, void* data, size_t size)
-{
-    if(*bt == NULL)
-    {
+static int bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, size_t size) {
+    if (*bt == NULL) {
         *bt = allocz(NULL, sizeof(bt_node_t));
-        bt_node_t* b = *bt;
+        bt_node_t *b = *bt;
         b->hash_key = hash;
         b->prev = prev;
 
@@ -1955,17 +2050,14 @@ static int bt_node_set(bt_node_t** bt, bt_node_t* prev, uint64_t hash, void* dat
         memcpy(b->data, data, size);
 
         return ST_OK;
-    }
-    else
-    {
-        bt_node_t* b = *bt;
+    } else {
+        bt_node_t *b = *bt;
 
-        if(b->hash_key > hash)
+        if (b->hash_key > hash)
             return bt_node_set(&b->right, b, hash, data, size);
-        else if(b->hash_key < hash)
+        else if (b->hash_key < hash)
             return bt_node_set(&b->left, b, hash, data, size);
-        else
-        {
+        else {
             SAFE_RELEASE(b->data);
 
             b->data = allocz(NULL, size);
@@ -1978,27 +2070,24 @@ static int bt_node_set(bt_node_t** bt, bt_node_t* prev, uint64_t hash, void* dat
 }
 
 
-static int bt_node_get(bt_node_t* bt, uint64_t hash, void** data)
-{
-    if(bt == NULL)
+static int bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
+    if (bt == NULL)
         return ST_NOT_FOUND;
 
-    if(bt->hash_key > hash)
+    if (bt->hash_key > hash)
         return bt_node_get(bt->right, hash, data);
-    else if(bt->hash_key < hash)
+    else if (bt->hash_key < hash)
         return bt_node_get(bt->left, hash, data);
-    else
-    {
+    else {
         *data = bt->data;
         return ST_OK;
     }
 }
 
-static int bt_node_left(bt_node_t* bt, bt_node_t** left)
-{
-    bt_node_t* cur = bt;
+static int bt_node_left(bt_node_t *bt, bt_node_t **left) {
+    bt_node_t *cur = bt;
 
-    while(cur && cur->left)
+    while (cur && cur->left)
         cur = cur->left;
 
     *left = cur;
@@ -2006,11 +2095,10 @@ static int bt_node_left(bt_node_t* bt, bt_node_t** left)
     return ST_OK;
 }
 
-typedef void(*bt_node_traverse_cb)(bt_node_t*);
+typedef void(*bt_node_traverse_cb)(bt_node_t *);
 
-static void bt_node_traverse(bt_node_t* bt, bt_node_traverse_cb cb)
-{
-    if(bt == NULL) return;
+static void bt_node_traverse(bt_node_t *bt, bt_node_traverse_cb cb) {
+    if (bt == NULL) return;
 
     bt_node_traverse(bt->left, cb);
     bt_node_traverse(bt->right, cb);
@@ -2020,29 +2108,28 @@ static void bt_node_traverse(bt_node_t* bt, bt_node_traverse_cb cb)
 
 // froentends
 
-typedef struct binary_tree
-{
-    bt_node_t* head;
+typedef struct binary_tree {
+    bt_node_t *head;
     size_t elem_size;
 } binary_tree_t;
 
 
-static int bt_init(binary_tree_t** bt, size_t elem_size)
-{
+static int bt_init(binary_tree_t **bt, size_t elem_size) {
     *bt = allocz(NULL, sizeof(binary_tree_t));
     (*bt)->elem_size = elem_size;
 
     return ST_OK;
 }
 
-static int bt_release(binary_tree_t** bt)
-{
-    if(NULLPP(bt) || *bt == NULL)
+static int bt_release(binary_tree_t **bt) {
+    if (NULLPP(bt))
         return ST_EMPTY;
 
-    bt_node_release(&(*bt)->head);
+    if (*bt != NULL) {
+        bt_node_release(&(*bt)->head);
 
-    safe_free((void**)bt);
+        safe_free((void **) bt);
+    }
 
     return ST_OK;
 }
@@ -2050,22 +2137,19 @@ static int bt_release(binary_tree_t** bt)
 
 //simple char*:int froentend
 
-typedef struct str_int
-{
-    const char* str;
+typedef struct str_int {
+    const char *str;
     uint64_t i;
 } str_int_t;
 
-static str_int_t heap_str_int_decode(void* p)
-{
+static str_int_t heap_str_int_decode(void *p) {
     str_int_t i;
     memcpy(&i, p, sizeof(str_int_t));
 
     return i;
 }
 
-static int bt_si_set(binary_tree_t* bt, const char* key, uint64_t i)
-{
+static int bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
     uint64_t hash = crc64s(key);
     str_int_t data;
     data.str = key;
@@ -2073,31 +2157,27 @@ static int bt_si_set(binary_tree_t* bt, const char* key, uint64_t i)
     return bt_node_set(&bt->head, NULL, hash, &data, bt->elem_size);
 }
 
-static int bt_si_get(binary_tree_t* bt, const char* key, str_int_t** i)
-{
+static int bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
     uint64_t hash = crc64s(key);
-    void* p = NULL;
+    void *p = NULL;
     int ret = bt_node_get(bt->head, hash, &p);
-    if(ret != ST_OK)
+    if (ret != ST_OK)
         return ret;
 
-    //**i = heap_str_int_decode(p);
-    *i = (str_int_t*)p;
+    *i = (str_int_t *) p;
 
     return ret;
 }
 
-static void bt_si_traverse_cb(bt_node_t* node)
-{
+static void bt_si_traverse_cb(bt_node_t *node) {
     static int counter = 1;
     str_int_t i = heap_str_int_decode(node->data);
 
-    LOG_DEBUG("[%d][%08lX] %s : 0x%lX\n", counter++, node->hash_key, i.str, i.i);
+    LOG_DEBUG("[%d][%08lX] %s : 0x%lX", counter++, node->hash_key, i.str, i.i);
 }
 
 
-static void bt_si_traverse(binary_tree_t* bt)
-{
+static void bt_si_traverse(binary_tree_t *bt) {
     bt_node_traverse(bt->head, &bt_si_traverse_cb);
 }
 
@@ -2105,11 +2185,9 @@ static void bt_si_traverse(binary_tree_t* bt)
 // TESTS
 //=============================================================================================
 
-
-static void test_hash_bt()
-{
-    binary_tree_t* bt;
-    str_int_t* node = NULL;
+static void test_hash_bt() {
+    binary_tree_t *bt;
+    str_int_t *node = NULL;
     bt_init(&bt, sizeof(str_int_t));
 
     bt_si_set(bt, "1", 1);
@@ -2160,11 +2238,16 @@ static void test_hash_bt()
     bt_si_get(bt, "15", &node);
     ASSERT(node->i == 0xF);
 
-    bt_si_get(bt, "11", &node); node->i = 0xB;
-    bt_si_get(bt, "12", &node); node->i = 0xC;
-    bt_si_get(bt, "13", &node); node->i = 0xD;
-    bt_si_get(bt, "14", &node); node->i = 0xE;
-    bt_si_get(bt, "15", &node); node->i = 0xF;
+    bt_si_get(bt, "11", &node);
+    node->i = 0xB;
+    bt_si_get(bt, "12", &node);
+    node->i = 0xC;
+    bt_si_get(bt, "13", &node);
+    node->i = 0xD;
+    bt_si_get(bt, "14", &node);
+    node->i = 0xE;
+    bt_si_get(bt, "15", &node);
+    node->i = 0xF;
 
     bt_si_get(bt, "11", &node);
     ASSERT(node->i == 0xB);
@@ -2228,12 +2311,18 @@ static void test_hash_bt()
     ASSERT(node->i == 0);
 
 
-    bt_si_get(bt, "10", &node); node->i = 0xA;
-    bt_si_get(bt, "11", &node); node->i = 0xB;
-    bt_si_get(bt, "12", &node); node->i = 0xC;
-    bt_si_get(bt, "13", &node); node->i = 0xD;
-    bt_si_get(bt, "14", &node); node->i = 0xE;
-    bt_si_get(bt, "15", &node); node->i = 0xF;
+    bt_si_get(bt, "10", &node);
+    node->i = 0xA;
+    bt_si_get(bt, "11", &node);
+    node->i = 0xB;
+    bt_si_get(bt, "12", &node);
+    node->i = 0xC;
+    bt_si_get(bt, "13", &node);
+    node->i = 0xD;
+    bt_si_get(bt, "14", &node);
+    node->i = 0xE;
+    bt_si_get(bt, "15", &node);
+    node->i = 0xF;
 
     bt_si_get(bt, "10", &node);
     ASSERT(node->i == 0xA);
@@ -2251,22 +2340,23 @@ static void test_hash_bt()
     bt_si_traverse(bt);
 
     bt_release(&bt);
+
+    ASSERT(NULLPP(bt));
 }
 
 
-static int test_slist()
-{
-    slist* sl = NULL;
+static int test_slist() {
+    slist *sl = NULL;
     slist_init(&sl);
 
-    string* s1 = NULL;
-    string* s2 = NULL;
-    string* s3 = NULL;
-    string* s4 = NULL;
-    string* s5 = NULL;
-    string* s6 = NULL;
-    string* s7 = NULL;
-    string* s55 =NULL;
+    string *s1 = NULL;
+    string *s2 = NULL;
+    string *s3 = NULL;
+    string *s4 = NULL;
+    string *s5 = NULL;
+    string *s6 = NULL;
+    string *s7 = NULL;
+    string *s55 = NULL;
 
 
     string_create(&s1, "test1");
@@ -2294,7 +2384,7 @@ static int test_slist()
     fprintf(stdtest, "\n\n");
 
 
-    string* found = NULL;
+    string *found = NULL;
     slist_find_eq(sl, s55, &found);
 
 
@@ -2306,16 +2396,16 @@ static int test_slist()
     fprintf(stdtest, "\n\n");
 
 
-    slist* sl2 = NULL;
+    slist *sl2 = NULL;
     slist_init(&sl2);
 
-    string* s21 = NULL;
-    string* s22 = NULL;
-    string* s23 = NULL;
-    string* s24 = NULL;
-    string* s25 = NULL;
-    string* s26 = NULL;
-    string* s27 = NULL;
+    string *s21 = NULL;
+    string *s22 = NULL;
+    string *s23 = NULL;
+    string *s24 = NULL;
+    string *s25 = NULL;
+    string *s26 = NULL;
+    string *s27 = NULL;
 
 
     string_create(&s21, "Ivan");
@@ -2338,7 +2428,7 @@ static int test_slist()
     slist_fprint(sl2, stdtest);
     fprintf(stdtest, "\n\n");
     slist_rfprint(sl2, stdtest);
-    fprintf(stdtest,"\n\n");
+    fprintf(stdtest, "\n\n");
 
 
     slist_merge(sl, sl2);
@@ -2349,37 +2439,43 @@ static int test_slist()
     fprintf(stdtest, "\n\n");
 
 
-    string* text = NULL;
+    string *text = NULL;
     string_init(&text);
 
 
     string_append(text, "SIZE=\"240057409536\" MODEL=\"TOSHIBA-TR150   \" LABEL=\"\" UUID=\"\" MOUNTPOINT=\"\"\n");
-    string_append(text, "NAME=\"sda1\" FSTYPE=\"vfat\" SCHED=\"cfq\" SIZE=\"536870912\" MODEL=\"\" LABEL=\"\" UUID=\"B58E-8A00\" MOUNTPOINT=\"/boot\"\n");
-    string_append(text, "NAME=\"sda2\" FSTYPE=\"swap\" SCHED=\"cfq\" SIZE=\"17179869184\" MODEL=\"\" LABEL=\"\" UUID=\"c8ae3239-f359-4bff-8994-c78d20efd308\" MOUNTPOINT=\"[SWAP]\"\n");
-    string_append(text, "NAME=\"sda3\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"42949672960\" MODEL=\"\" LABEL=\"\" UUID=\"ecff6ff7-1380-44df-a1a5-e2a4e10eba4e\" MOUNTPOINT=\"/\"\n");
-    string_append(text, "NAME=\"sda4\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"179389931008\" MODEL=\"\" LABEL=\"\" UUID=\"e77e913c-9829-4750-b3ee-ccf4e641d67a\" MOUNTPOINT=\"/home\"\n");
-    string_append(text, "NAME=\"sdb\" FSTYPE=\"\" SCHED=\"cfq\" SIZE=\"2000398934016\" MODEL=\"ST2000DM001-1CH1\" LABEL=\"\" UUID=\"\" MOUNTPOINT=\"\"\n");
-    string_append(text, "NAME=\"sdb1\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"2000397868544\" MODEL=\"\" LABEL=\"\" UUID=\"cdc9e724-a78b-4a25-9647-ad6390e235c3\" MOUNTPOINT=\"\"\n");
+    string_append(text,
+                  "NAME=\"sda1\" FSTYPE=\"vfat\" SCHED=\"cfq\" SIZE=\"536870912\" MODEL=\"\" LABEL=\"\" UUID=\"B58E-8A00\" MOUNTPOINT=\"/boot\"\n");
+    string_append(text,
+                  "NAME=\"sda2\" FSTYPE=\"swap\" SCHED=\"cfq\" SIZE=\"17179869184\" MODEL=\"\" LABEL=\"\" UUID=\"c8ae3239-f359-4bff-8994-c78d20efd308\" MOUNTPOINT=\"[SWAP]\"\n");
+    string_append(text,
+                  "NAME=\"sda3\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"42949672960\" MODEL=\"\" LABEL=\"\" UUID=\"ecff6ff7-1380-44df-a1a5-e2a4e10eba4e\" MOUNTPOINT=\"/\"\n");
+    string_append(text,
+                  "NAME=\"sda4\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"179389931008\" MODEL=\"\" LABEL=\"\" UUID=\"e77e913c-9829-4750-b3ee-ccf4e641d67a\" MOUNTPOINT=\"/home\"\n");
+    string_append(text,
+                  "NAME=\"sdb\" FSTYPE=\"\" SCHED=\"cfq\" SIZE=\"2000398934016\" MODEL=\"ST2000DM001-1CH1\" LABEL=\"\" UUID=\"\" MOUNTPOINT=\"\"\n");
+    string_append(text,
+                  "NAME=\"sdb1\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"2000397868544\" MODEL=\"\" LABEL=\"\" UUID=\"cdc9e724-a78b-4a25-9647-ad6390e235c3\" MOUNTPOINT=\"\"\n");
 
 
-    slist* blklist = NULL;
+    slist *blklist = NULL;
     string_split(text, '\n', &blklist);
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
     slist_fprint(blklist, stdout);
     fflush(stdout);
 
-    string* tk = NULL;
+    string *tk = NULL;
     slist_init_current(blklist);
-    while((tk = slist_next(blklist)) != NULL) {
+    while ((tk = slist_next(blklist)) != NULL) {
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_fprint(tk, stdout);
+        string_printd(tk);
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist* tokens = NULL;
-        string_split(tk,' ',&tokens);
+        slist *tokens = NULL;
+        string_split(tk, ' ', &tokens);
 
         slist_fprint(tokens, stdout);
 
@@ -2395,14 +2491,14 @@ static int test_slist()
 
 
             slist_init_current(kv);
-            string* key = slist_next(kv);
+            string *key = slist_next(kv);
             string *val = slist_next(kv);
 
             string_strip(val);
 
             fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
-            string_fprint(key, stdout);
-            string_fprint(string_null, stdout);
+            string_printd(key);
+            string_printd(string_null);
 
             slist_release(&kv, true);
         }
@@ -2485,26 +2581,25 @@ enum {
 };
 
 
-static size_t get_sfile_size(const char* filename) {
+static size_t get_sfile_size(const char *filename) {
     struct stat st;
     stat(filename, &st);
     return (size_t) st.st_size;
 }
 
-typedef void(*cmd_exec_cb)(void *, slist*);
+typedef void(*cmd_exec_cb)(void *, slist *);
 
-static void sfile_mmap(const char* filename, string* s)
-{
+static void sfile_mmap(const char *filename, string *s) {
     size_t filesize = get_sfile_size(filename);
     //Open file
     int fd = open(filename, O_RDONLY, 0);
 
     //Execute mmap
-    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+    void *data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
 
     //Write the mmapped data
     string_init(&s);
-    string_appendn(s, (char*)data, filesize);
+    string_appendn(s, (char *) data, filesize);
 
     //Cleanup
     munmap(data, filesize);
@@ -2518,17 +2613,16 @@ static size_t get_fd_file_size(int fd) {
     return (size_t) st.st_size;
 }
 
-static void fd_file_mmap(int fd, string* s)
-{
+static void fd_file_mmap(int fd, string *s) {
     size_t filesize = get_fd_file_size(fd);
 
     //Execute mmap
-    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+    void *data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
 
 
     //Write the mmapped data
     string_init(&s);
-    string_appendn(s, (char*)data, filesize);
+    string_appendn(s, (char *) data, filesize);
 
     //Cleanup
     munmap(data, filesize);
@@ -2544,11 +2638,11 @@ static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     char line[1024] = {0};
 
 
-    slist* sl;
+    slist *sl;
     slist_init(&sl);
 
     while (fgets(line, sizeof(line), fpipe)) {
-        string* s = NULL;
+        string *s = NULL;
 
         string_createz(&s, line);
         slist_append(sl, s);
@@ -2571,9 +2665,8 @@ enum {
 };
 
 
-typedef struct df_stat
-{
-    string* dev;
+typedef struct df_stat {
+    string *dev;
 
     uint64_t total;
     uint64_t used;
@@ -2584,25 +2677,24 @@ typedef struct df_stat
 } df_stat_t;
 
 typedef struct {
-    hashtable_t* stats;
+    hashtable_t *stats;
     uint64_t skip_first;
 } df_t;
 
 
-static void df_init(df_t** df) {
+static void df_init(df_t **df) {
     *df = allocz(NULL, sizeof(df_t));
     (*df)->stats = allocz(NULL, sizeof(hashtable_t));
     (*df)->skip_first = 1;
 }
 
-static int ht_set_df(hashtable_t* ht, string* key, df_stat_t* stat)
-{
+static int ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
 
-    ht_key_t* hkey = NULL;
-    uint64_t hash = crc64(0, (uint8_t*)key->alloc->ptr, key->size);
+    ht_key_t *hkey = NULL;
+    uint64_t hash = crc64(0, (uint8_t *) key->alloc->ptr, key->size);
     ht_create_key_i(hash, &hkey);
 
-    ht_value_t* val = NULL;
+    ht_value_t *val = NULL;
     ht_create_value(stat, sizeof(df_stat_t), &val);
 
     ht_set(ht, hkey, val);
@@ -2610,28 +2702,27 @@ static int ht_set_df(hashtable_t* ht, string* key, df_stat_t* stat)
     return ST_OK;
 }
 
-static void df_callback(void *ctx, slist* lines)
-{
-    df_t* df = (df_t*)ctx;
+static void df_callback(void *ctx, slist *lines) {
+    df_t *df = (df_t *) ctx;
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
     slist_fprint(lines, stdout);
     fflush(stdout);
 
-    string* tk = NULL;
+    string *tk = NULL;
     slist_init_current(lines);
-    while((tk = slist_next(lines)) != NULL) {
+    while ((tk = slist_next(lines)) != NULL) {
 
-        if(string_starts_withz(tk, "/dev/") != ST_OK)
+        if (string_starts_withz(tk, "/dev/") != ST_OK)
             continue;
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_fprint(tk, stdout);
+        string_print(tk);
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist* tokens = NULL;
-        string_split(tk,' ',&tokens);
+        slist *tokens = NULL;
+        string_split(tk, ' ', &tokens);
 
         slist_fprint(tokens, stdout);
 
@@ -2640,20 +2731,20 @@ static void df_callback(void *ctx, slist* lines)
         //==============================
         // init df_stat
 
-        df_stat_t* stat = allocz(NULL, sizeof(df_stat_t));
+        df_stat_t *stat = allocz(NULL, sizeof(df_stat_t));
 
 
         //==============================
 
 
         string *s = NULL;
-        string* sname = NULL;
+        string *sname = NULL;
         uint64_t k = 0;
         while ((s = slist_next(tokens)) != NULL) {
 
             string_strip(s);
 
-            switch(k) {
+            switch (k) {
                 case 0:
                     string_dub(s, &sname);
                     string_dub(s, &stat->dev);
@@ -2694,20 +2785,19 @@ static void df_callback(void *ctx, slist* lines)
 
 }
 
-static void df_execute(df_t* dfs) {
+static void df_execute(df_t *dfs) {
 
-    string* s;
+    string *s;
     string_createz(&s, "df --block-size=1");
 
     char *cmd = NULL;
-    char* cmd_end;
+    char *cmd_end;
     string_map_string(s, &cmd, &cmd_end);
     cmd_execute(cmd, dfs, &df_callback);
 }
 
 
-enum
-{
+enum {
     BLK_NAME = 0,
     BLK_FSTYPE,
     BLK_SCHED,
@@ -2720,19 +2810,17 @@ enum
 };
 
 typedef struct sblkid {
-    hashtable_t* blk;
+    hashtable_t *blk;
 } sblkid_t;
 
-typedef struct
-{
-    char* ns;
-    char* ne;
-    char* vs;
-    char* ve;
+typedef struct {
+    char *ns;
+    char *ne;
+    char *vs;
+    char *ve;
 } kv_pair;
 
-enum
-{
+enum {
     SM_CHAR = 0,
     SM_EQUAL,
     SM_QUOTE,
@@ -2740,34 +2828,30 @@ enum
 };
 
 
-static int sm_token(char ch)
-{
-    if(ch == '"') return SM_QUOTE;
-    if(ch == '=') return SM_EQUAL;
-    if(isspace(ch)) return SM_SPACE;
+static int sm_token(char ch) {
+    if (ch == '"') return SM_QUOTE;
+    if (ch == '=') return SM_EQUAL;
+    if (isspace(ch)) return SM_SPACE;
     return SM_CHAR;
 }
 
 #define FSM_CALLBACK(x) ((size_t)&x)
 
 
-typedef struct system
-{
-    hashtable_t* blk;
+typedef struct system {
+    hashtable_t *blk;
 } system_t;
 
 
-static int system_init(system_t** sys)
-{
+static int system_init(system_t **sys) {
     *sys = allocz(NULL, sizeof(system_t));
     ht_init(&(*sys)->blk);
 
     return ST_OK;
 }
 
-static int vector_add_kv(vector_t* vec, string* key, string* val)
-{
-    skey_value_t* kv = allocz(NULL, sizeof(skey_value_t));
+static int vector_add_kv(vector_t *vec, string *key, string *val) {
+    skey_value_t *kv = allocz(NULL, sizeof(skey_value_t));
     string_dub(key, &kv->key);
     string_dub(val, &kv->value);
 
@@ -2776,14 +2860,13 @@ static int vector_add_kv(vector_t* vec, string* key, string* val)
     return ST_OK;
 }
 
-static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
-{
+static int ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
 
-    ht_key_t* hkey = NULL;
-    uint64_t hash = crc64(0, (uint8_t*)key->alloc->ptr, key->size);
+    ht_key_t *hkey = NULL;
+    uint64_t hash = crc64(0, (uint8_t *) key->alloc->ptr, key->size);
     ht_create_key_i(hash, &hkey);
 
-    ht_value_t* val = NULL;
+    ht_value_t *val = NULL;
     ht_create_value(vec, sizeof(vector_t), &val);
 
     ht_set(ht, hkey, val);
@@ -2796,13 +2879,12 @@ static int ht_set_s(hashtable_t* ht, string* key, vector_t* vec)
 /* Compile the regular expression described by "regex_text" into
    "r". */
 
-static int compile_regex (regex_t * r, const char * regex_text)
-{
-    int status = regcomp (r, regex_text, REG_EXTENDED|REG_NEWLINE);
+static int compile_regex(regex_t *r, const char *regex_text) {
+    int status = regcomp(r, regex_text, REG_EXTENDED | REG_NEWLINE);
     if (status != 0) {
         char error_message[MAX_ERROR_MSG];
-        regerror (status, r, error_message, MAX_ERROR_MSG);
-        fprintf (stderr, "Regex error compiling '%s': %s\n",
+        regerror(status, r, error_message, MAX_ERROR_MSG);
+        fprintf(stderr, "Regex error compiling '%s': %s\n",
                 regex_text, error_message);
         return 1;
     }
@@ -2814,11 +2896,10 @@ static int compile_regex (regex_t * r, const char * regex_text)
   expression in "r".
  */
 
-static int match_regex (regex_t * r, const char * to_match)
-{
+static int match_regex(regex_t *r, const char *to_match) {
     /* "P" is a pointer into the string which points to the end of the
        previous match. */
-    const char * p = to_match;
+    const char *p = to_match;
     /* "N_matches" is the maximum number of matches allowed. */
     const int n_matches = 10;
     /* "M" contains the matches found. */
@@ -2826,9 +2907,9 @@ static int match_regex (regex_t * r, const char * to_match)
 
     while (1) {
         int i = 0;
-        int nomatch = regexec (r, p, n_matches, m, 0);
+        int nomatch = regexec(r, p, n_matches, m, 0);
         if (nomatch) {
-            printf ("No more matches.\n");
+            printf("No more matches.\n");
             return nomatch;
         }
         for (i = 0; i < n_matches; i++) {
@@ -2840,13 +2921,12 @@ static int match_regex (regex_t * r, const char * to_match)
             start = (int) (m[i].rm_so + (p - to_match));
             finish = (int) (m[i].rm_eo + (p - to_match));
             if (i == 0) {
-                printf ("$& is ");
+                printf("$& is ");
+            } else {
+                printf("$%d is ", i);
             }
-            else {
-                printf ("$%d is ", i);
-            }
-            printf ("'%.*s' (bytes %d:%d)\n", (finish - start),
-                    to_match + start, start, finish);
+            printf("'%.*s' (bytes %d:%d)\n", (finish - start),
+                   to_match + start, start, finish);
         }
         p += m[0].rm_eo;
     }
@@ -2854,7 +2934,7 @@ static int match_regex (regex_t * r, const char * to_match)
 }
 
 
-static void sblk_callback(void *ctx, slist* lines) {
+static void sblk_callback(void *ctx, slist *lines) {
 
     sblkid_t *sys = (sblkid_t *) ctx;
     ht_init(&sys->blk);
@@ -2865,7 +2945,7 @@ static void sblk_callback(void *ctx, slist* lines) {
         while ((tk = slist_next(lines)) != NULL) {
 
             fprintf(stdout, "------- TOKEN LINE-----------\n");
-            string_fprint(tk, stdout);
+            string_print(tk);
 
 
             //================================
@@ -2884,17 +2964,17 @@ static void sblk_callback(void *ctx, slist* lines) {
     slist_fprint(lines, stdout);
     fflush(stdout);
 
-    string* tk = NULL;
+    string *tk = NULL;
     slist_init_current(lines);
-    while((tk = slist_next(lines)) != NULL) {
+    while ((tk = slist_next(lines)) != NULL) {
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_fprint(tk, stdout);
+        string_print(tk);
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist* tokens = NULL;
-        string_split(tk,' ',&tokens);
+        slist *tokens = NULL;
+        string_split(tk, ' ', &tokens);
 
 
         slist_fprint(tokens, stdout);
@@ -2904,14 +2984,14 @@ static void sblk_callback(void *ctx, slist* lines) {
         //==============================
         // vector pair init
 
-        vector_t* vec = NULL;
+        vector_t *vec = NULL;
         vector_init(&vec, sizeof(skey_value_t));
 
         //==============================
 
 
         string *s = NULL;
-        string* sname = NULL;
+        string *sname = NULL;
         while ((s = slist_next(tokens)) != NULL) {
 
 
@@ -2923,12 +3003,12 @@ static void sblk_callback(void *ctx, slist* lines) {
 
 
             slist_init_current(kv);
-            string* key = slist_next(kv);
+            string *key = slist_next(kv);
             string *val = slist_next(kv);
 
             string_strip(val);
 
-            if(string_comparez(key,"NAME") == ST_OK)
+            if (string_comparez(key, "NAME") == ST_OK)
                 string_dub(val, &sname);
 
             fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
@@ -2936,8 +3016,8 @@ static void sblk_callback(void *ctx, slist* lines) {
             //add kv
             vector_add_kv(vec, key, val);
 
-            string_fprint(key, stdout);
-            string_fprint(val, stdout);
+            string_print(key);
+            string_print(val);
 
             slist_release(&kv, true);
         }
@@ -2957,7 +3037,7 @@ static void sblk_callback(void *ctx, slist* lines) {
 static int sblk_execute(sblkid_t *sblk) {
     static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
 
-    string* cmd = NULL;
+    string *cmd = NULL;
     string_create(&cmd, "lsblk -i -P -b -o ");
     string_append(cmd, options[0]);
 
@@ -2972,7 +3052,7 @@ static int sblk_execute(sblkid_t *sblk) {
 
 
     char *ccmd = NULL;
-    char* cmd_end = NULL;
+    char *cmd_end = NULL;
     string_map_string(cmd, &ccmd, &cmd_end);
     cmd_execute(ccmd, sblk, &sblk_callback);
 
@@ -2981,22 +3061,22 @@ static int sblk_execute(sblkid_t *sblk) {
 
 
 typedef struct device {
-    string* name;
+    string *name;
     //struct statvfs stats;
     //std::vector <uint64_t> stat;
-    string* perf_read;
-    string* perf_write;
-    string* label;
+    string *perf_read;
+    string *perf_write;
+    string *label;
     uint64_t size;
     uint64_t used;
     uint64_t avail;
     double perc;
-    string* fsize;
-    string* fuse;
-    string* fs;
-    string* mount;
-    string* sysfolder;
-    string* model;
+    string *fsize;
+    string *fuse;
+    string *fs;
+    string *mount;
+    string *sysfolder;
+    string *model;
     uint64_t child;
     vector_t childs;
 } device_t;
@@ -3473,38 +3553,34 @@ typedef struct device {
 //    }
 //}
 
-struct A
-{
+struct A {
     OBJECT_DECLARE()
 
     int i;
     char ch;
 
-    char* str;
+    char *str;
 
 };
 
 static uint64_t total_leak = 0;
 
-void scan_alloc(uint64_t hash, ht_key_t* key, ht_value_t* val)
-{
-    fprintf(stderr,"[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t)val->ptr, val->size);
+void scan_alloc(uint64_t hash, ht_key_t *key, ht_value_t *val) {
+    fprintf(stderr, "[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t) val->ptr, val->size);
     total_leak += val->size;
     key->u.i = hash;
 }
 
 
-void scan_blk(uint64_t hash, ht_key_t* key, ht_value_t* val)
-{
-    vector_t* vec = (vector_t*)val->ptr;
+void scan_blk(uint64_t hash, ht_key_t *key, ht_value_t *val) {
+    vector_t *vec = (vector_t *) val->ptr;
 
     size_t sz = vector_size(vec);
 
-    for(size_t i =0; i < sz; ++i)
-    {
-        skey_value_t* kv = NULL;
-        vector_get(vec, i, (void**)&kv);
-        fprintf(stderr,"[scan_blk][0x%08lx] %s=%s\n", hash, kv->key->alloc->ptr, kv->value->alloc->ptr);
+    for (size_t i = 0; i < sz; ++i) {
+        skey_value_t *kv = NULL;
+        vector_get(vec, i, (void **) &kv);
+        fprintf(stderr, "[scan_blk][0x%08lx] %s=%s\n", hash, kv->key->alloc->ptr, kv->value->alloc->ptr);
     }
 
 
@@ -3512,29 +3588,94 @@ void scan_blk(uint64_t hash, ht_key_t* key, ht_value_t* val)
 }
 
 
-
-void scan_df(uint64_t hash, ht_key_t* key, ht_value_t* val)
-{
-    df_stat_t* stat = (df_stat_t*)val->ptr;
+void scan_df(uint64_t hash, ht_key_t *key, ht_value_t *val) {
+    df_stat_t *stat = (df_stat_t *) val->ptr;
 
 
-    fprintf(stderr,"[scan_df][0x%08lx][%s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash, stat->dev->alloc->ptr,
-                                                    stat->total, stat->used, stat->avail, stat->use);
-
+    fprintf(stderr, "[scan_df][0x%08lx][%s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash, stat->dev->alloc->ptr,
+            stat->total, stat->used, stat->avail, stat->use);
 
 
     key->u.i = hash;
 }
 
+void check_style_defines() {
+#ifdef _POSIX_SOURCE
+    printf("_POSIX_SOURCE defined\n");
+#endif
+
+#ifdef _POSIX_C_SOURCE
+    printf("_POSIX_C_SOURCE defined: %ldL\n", (long) _POSIX_C_SOURCE);
+#endif
+
+#ifdef _ISOC99_SOURCE
+    printf("_ISOC99_SOURCE defined\n");
+#endif
+
+#ifdef _ISOC11_SOURCE
+    printf("_ISOC11_SOURCE defined\n");
+#endif
+
+#ifdef _XOPEN_SOURCE
+    printf("_XOPEN_SOURCE defined: %d\n", _XOPEN_SOURCE);
+#endif
+
+#ifdef _XOPEN_SOURCE_EXTENDED
+    printf("_XOPEN_SOURCE_EXTENDED defined\n");
+#endif
+
+#ifdef _LARGEFILE64_SOURCE
+    printf("_LARGEFILE64_SOURCE defined\n");
+#endif
+
+#ifdef _FILE_OFFSET_BITS
+    printf("_FILE_OFFSET_BITS defined: %d\n", _FILE_OFFSET_BITS);
+#endif
+
+#ifdef _BSD_SOURCE
+    printf("_BSD_SOURCE defined\n");
+#endif
+
+#ifdef _SVID_SOURCE
+    printf("_SVID_SOURCE defined\n");
+#endif
+
+#ifdef _ATFILE_SOURCE
+    printf("_ATFILE_SOURCE defined\n");
+#endif
+
+#ifdef _GNU_SOURCE
+    printf("_GNU_SOURCE defined\n");
+#endif
+
+#ifdef _REENTRANT
+    printf("_REENTRANT defined\n");
+#endif
+
+#ifdef _THREAD_SAFE
+    printf("_THREAD_SAFE defined\n");
+#endif
+
+#ifdef _FORTIFY_SOURCE
+    printf("_FORTIFY_SOURCE defined\n");
+#endif
+}
+
+//=======================================================================================
+// MAIN
+//=======================================================================================
+
 int main() {
 
+    check_style_defines();
     init_gloabls();
 
     enable_stdout(true);
     enable_stderr(true);
 
 
-    test_hash_bt();
+    test_dynamic_allocator();
+    //test_hash_bt();
     //test_slist();
 
 //
