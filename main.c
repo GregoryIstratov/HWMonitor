@@ -8,23 +8,25 @@
 #include <sys/param.h>
 #include <sys/syscall.h>
 #include <bits/mman.h>
-
-#include <blkid/blkid.h>
 #include <pthread.h>
-#include <ncurses.h>
-
 #include <ctype.h>
 #include <string.h>
 #include <regex.h>
 #include <assert.h>
-
 #include <time.h>
 #include <sys/time.h>
+
+
+//external
+#include <blkid/blkid.h> // apt install libblkid-dev
+#include <ncurses.h>     // apt install libncurses5-dev
+#include <stdbool.h>
+
 //=======================================================================
 // LOG
 //=======================================================================
 
-//#define ENABLE_LOGGING
+#define ENABLE_LOGGING
 
 #ifndef ENABLE_LOGGING
 #define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
@@ -50,22 +52,21 @@ static void _log(FILE* out, ...)
 
 
 #else
-#define LOG_ERROR(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ERROR, __VA_ARGS__))
-#define LOG_WARN(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_WARN, __VA_ARGS__))
-#define LOG_DEBUG(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_DEBUG, __VA_ARGS__))
-#define LOG_INFO(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_INFO, __VA_ARGS__))
-#define LOG_TRACE(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_TRACE, __VA_ARGS__))
-#define LOG_ASSERT(...) (_log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ASSERT, __VA_ARGS__))
-#define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __ASSERT_FUNCTION, LOG_ASSERT, #exp))
+#define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
+#define LOG_WARN(...) (_log(__FILE__, __LINE__, __func__, LOG_WARN, __VA_ARGS__))
+#define LOG_DEBUG(...) (_log(__FILE__, __LINE__, __func__, LOG_DEBUG, __VA_ARGS__))
+#define LOG_INFO(...) (_log(__FILE__, __LINE__, __func__, LOG_INFO, __VA_ARGS__))
+#define LOG_TRACE(...) (_log(__FILE__, __LINE__, __func__, LOG_TRACE, __VA_ARGS__))
+#define LOG_ASSERT(...) (_log(__FILE__, __LINE__, __func__, LOG_ASSERT, __VA_ARGS__))
+#define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
 
-#define LOG_SHOW_TIME
-#define LOG_SHOW_DATE
-#define LOG_SHOW_THREAD
+//#define LOG_SHOW_TIME
+//#define LOG_SHOW_DATE
+//#define LOG_SHOW_THREAD
 #define LOG_SHOW_PATH
-#define LOG_ENABLE_MULTITHREADING
+//#define LOG_ENABLE_MULTITHREADING
 
 #define LOG_FORMAT_BUFFER_MAX_SIZE 2048
-
 
 
 #define LOG_RED   "\x1B[31m"
@@ -227,7 +228,7 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
 //#define EXIT_IF_NULL(x) if(!(#x)) { fprintf(stderr, "%s:%d [%s]: returns NULL pointer",  __FILE__, __LINE__, __PRETTY_FUNCTION__); exit(EXIT_FAILURE); }
 
 #define SAFE_RELEASE_PP(x) { if(x && *x){ safe_free((void**)x); *x = NULL; } }
-#define SAFE_RELEASE(x) { if(x){ safe_free(&x); x = NULL; } }
+#define SAFE_RELEASE(x) { if(x){ free(x); x = NULL; } }
 //#define ERROR_EXIT() { perror(strerror(errno)); exit(errno); }
 
 //===============================================================
@@ -245,7 +246,7 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
 // GLOBAS
 //===============================================================
 enum {
-    ST_OK,
+    ST_OK = 0,
     ST_ERR,
     ST_NOT_FOUND,
     ST_EMPTY,
@@ -254,6 +255,179 @@ enum {
     ST_SIZE_EXCEED,
     ST_UNKNOWN
 };
+
+//======================================================================================================================
+// RETURN MSG
+//======================================================================================================================
+// 64 bit
+// [16 bit reserved]    [16 bit value data] [8 bit depth]   [16 bit idx msg]     [8 bit code]
+// [................]   [.................] [........]      [................]   [........]
+// [0xFFFF000000000000] [0xFFFF00000000]    [0xFF000000]    [0xFFFF00]           [0xFF]
+
+#define RET_MULTITHREADED
+
+typedef uint64_t ret_t;
+
+typedef union ret_field
+{
+    uint8_t code;
+    uint16_t idx;
+    uint8_t depth;
+    uint16_t data;
+    uint16_t reserved;
+    uint64_t v;
+} ret_field_t;
+
+pthread_spinlock_t gmsg_tab_lock;
+static const char *gmsg_tab[UINT16_MAX]; // about 500 kb, //TODO make it dynamic
+static uint16_t gmsg_idx = 3245;
+
+#define return_trace(ret) LOG_TRACE("[%016d][%016d][%08d][%016d][%08d]", (uint16_t)((ret & 0xFFFF000000000000)>>48), \
+ (uint16_t)((ret & 0xFFFF00000000)>>32),  (uint8_t)((ret & 0xFF000000)>>24), (uint16_t)((ret & 0xFFFF00)>>8), (uint8_t)ret);
+
+
+static uint8_t return_code(ret_t ret) {
+    return (uint8_t) ret;
+}
+
+static uint16_t return_msg_idx(ret_t ret) {
+    return (uint16_t) (ret>>8);
+}
+
+static uint8_t return_depth(ret_t ret) {
+    return (uint8_t) (ret>>24UL);
+}
+
+static uint16_t return_user_data(ret_t ret) {
+    return (uint16_t) (ret>>32UL);
+}
+
+static ret_field_t* return_map(ret_t* ret)
+{
+    return (ret_field_t*)ret;
+}
+
+static ret_t return_create(uint8_t code) {
+    ret_t ret = code;
+    ret |= (ret_t) 1 << 24;
+
+    return_trace(ret);
+    return ret;
+}
+
+static ret_t return_create_v(uint8_t code, uint16_t user_data) {
+    ret_t ret = code;
+    ret |= (ret_t) 1 << 24;
+    ret |= (ret_t) user_data << 32;
+
+    return_trace(ret);
+
+    return ret;
+}
+
+static ret_t return_create_mv(uint8_t code, const char *msg, uint16_t user_data) {
+#ifdef RET_MULTITHREADED
+    pthread_spin_lock(&gmsg_tab_lock);
+
+    gmsg_tab[gmsg_idx++] = msg;
+
+    pthread_spin_unlock(&gmsg_tab_lock);
+#else
+    gmsg_tab[gmsg_idx++] = msg;
+#endif
+
+    ret_t ret = (ret_t) code;
+
+    return_trace(ret);
+
+    ret |= (ret_t) (gmsg_idx - 1) << 8;
+
+    return_trace(ret);
+
+    ret |= (ret_t) 231 << 24;
+
+    return_trace(ret);
+
+    ret |= (ret_t) user_data << 32;
+
+    return_trace(ret);
+
+    return ret;
+}
+
+static ret_t return_forward(ret_t r) {
+    ret_t ret = r;
+
+    return_trace(ret);
+
+    uint8_t depth = return_depth(ret) + 1;
+
+    ret &= 0xFFFFFFFF00FFFFFFUL;
+    ret |= depth << 24UL;
+
+
+    return_trace(ret);
+
+
+    return ret;
+
+}
+
+typedef struct ret_info {
+    uint8_t code;
+    const char *msg;
+    uint8_t depth;
+    uint16_t user_data;
+} ret_info_t;
+
+static void return_unpack(ret_t ret, ret_info_t *info) {
+    info->code = return_code(ret);
+
+    uint16_t idx = return_msg_idx(ret);
+#ifdef RET_MULTITHREADED
+    pthread_spin_lock(&gmsg_tab_lock);
+
+    info->msg = gmsg_tab[idx];
+
+    pthread_spin_unlock(&gmsg_tab_lock);
+#else
+    info->msg = gmsg_tab[idx];
+#endif
+
+    info->depth = return_depth(ret);
+
+    info->user_data = return_user_data(ret);
+}
+
+static ret_t _test_ret3() {
+    return return_create_mv(ST_OUT_OF_RANGE, "Massive bounds", 463);
+}
+
+static ret_t _test_ret2() {
+    return return_forward(_test_ret3());
+}
+
+static ret_t _test_ret1() {
+    ret_t r = _test_ret2();
+
+    return return_forward(r);
+}
+
+static void test_ret() {
+
+    ret_t ret = _test_ret1();
+
+
+    ret_info_t info;
+    return_unpack(ret, &info);
+
+    ASSERT(info.code == ST_OUT_OF_RANGE);
+    ASSERT(info.depth == 3);
+    ASSERT(strcmp(info.msg, "Massive bounds") == 0);
+    ASSERT(info.user_data == 463);
+
+
+}
 
 //======================================================================================================================
 //
@@ -283,27 +457,27 @@ typedef struct _hashtable_t {
     ht_item_t *table[HASHTABLE_SIZE];
 } hashtable_t;
 
-static int ht_init(hashtable_t **ht);
+static ret_t ht_init(hashtable_t **ht);
 
 static void ht_destroy(hashtable_t *ht);
 
-static int ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value);
+static ret_t ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value);
 
-static int ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value);
+static ret_t ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value);
 
 
 typedef void(*ht_forach_cb)(uint64_t, ht_key_t *, ht_value_t *);
 
-static int ht_foreach(hashtable_t *ht, ht_forach_cb cb);
+static ret_t ht_foreach(hashtable_t *ht, ht_forach_cb cb);
 
-static int ht_create_key_i(uint64_t keyval, ht_key_t **key) {
+static ret_t ht_create_key_i(uint64_t keyval, ht_key_t **key) {
     *key = malloc(sizeof(ht_key_t));
     (*key)->u.i = keyval;
 
     return ST_OK;
 }
 
-static int ht_create_value(void *p, size_t size, ht_value_t **value) {
+static ret_t ht_create_value(void *p, size_t size, ht_value_t **value) {
     *value = malloc(sizeof(ht_value_t));
     (*value)->ptr = p;
     (*value)->size = size;
@@ -329,8 +503,11 @@ static const size_t size_npos = (size_t) -1;
 
 static void string_init_globals();
 
-static int init_gloabls() {
+static ret_t init_gloabls() {
 
+#ifdef RET_MULTITHREADED
+    pthread_spin_init(&gmsg_tab_lock, 0);
+#endif
     //disable buffering for stdout
     //setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -347,7 +524,7 @@ static int init_gloabls() {
     stdtest = fopen("/dev/null", "w");
     stdtrace = fopen("/dev/null", "w");
 
-    //string_init_globals();
+    string_init_globals();
 
     return 0;
 }
@@ -366,7 +543,12 @@ static void enable_stderr(bool b) {
 }
 
 
-static int globals_shutdown() {
+static ret_t globals_shutdown() {
+
+#ifdef RET_MULTITHREADED
+    pthread_spin_destroy(&gmsg_tab_lock);
+#endif
+
     //ht_destroy(alloc_table);
     fclose(stdtest);
 
@@ -478,7 +660,7 @@ static void _record_alloc_set(void *ptr, size_t size) {
     ht_set(alloc_table, key, val);
 }
 
-static int _record_alloc_get(void *ptr, alloc_stat_t **stat) {
+static ret_t _record_alloc_get(void *ptr, alloc_stat_t **stat) {
     ht_value_t *val = NULL;
     ht_key_t *key = calloc(sizeof(ht_key_t), 1);
     key->u.i = PTR_TO_U64(ptr);
@@ -495,7 +677,7 @@ static int _record_alloc_get(void *ptr, alloc_stat_t **stat) {
 }
 
 static void safe_free(void **pp) {
-    if (NULLPP(pp))
+    if (NULLPP(pp) || *pp == NULL)
         return;
 
 
@@ -534,6 +716,9 @@ static void *zalloc(size_t size) {
 
 }
 
+
+#if 0
+
 //TODO rework this shit
 //// zeros allocated memory
 static void *allocz(void *dst, size_t size) {
@@ -567,6 +752,8 @@ static void *allocz(void *dst, size_t size) {
 //    _record_alloc_set(v, asize);
     return v;
 }
+
+#endif
 
 static void *mmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
@@ -746,7 +933,7 @@ static unsigned long ht_hash(const char *_str) {
 }
 
 
-static int ht_init(hashtable_t **ht) {
+static ret_t ht_init(hashtable_t **ht) {
     *ht = calloc(sizeof(hashtable_t), 1);
     return ST_OK;
 }
@@ -779,7 +966,7 @@ static void ht_destroy(hashtable_t *ht) {
 }
 
 
-static int ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *value) {
+static ret_t ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *value) {
     ht_item_t *item;
     if ((item = calloc(sizeof(ht_item_t), 1)) == NULL) {
         fprintf(stderr, "[ht_create_item] can't alloc");
@@ -795,7 +982,7 @@ static int ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *val
 }
 
 
-static int ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value) {
+static ret_t ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value) {
     uint64_t hash = key->u.i;
     size_t bin = hash % HASHTABLE_SIZE;
 
@@ -830,7 +1017,7 @@ static int ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value) {
     return ST_OK;
 }
 
-static int ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value) {
+static ret_t ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value) {
     uint64_t hash = key->u.i;
     uint64_t bin = hash % HASHTABLE_SIZE;
 
@@ -848,7 +1035,7 @@ static int ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value) {
     return ST_NOT_FOUND;
 }
 
-static int ht_foreach(hashtable_t *ht, ht_forach_cb cb) {
+static ret_t ht_foreach(hashtable_t *ht, ht_forach_cb cb) {
     for (size_t i = 0; i < HASHTABLE_SIZE; ++i) {
         ht_item_t *next = ht->table[i];
         while (next) {
@@ -865,7 +1052,7 @@ static int ht_foreach(hashtable_t *ht, ht_forach_cb cb) {
 //=======================================================================
 
 #define DA_TRACE(a) (LOG_TRACE("[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu", \
-a, a->ptr, a->size, a->used, a->mul, size))
+a, a->ptr, a->size, a->used, a->mul))
 
 typedef struct dynamic_allocator {
     char *ptr;
@@ -875,9 +1062,9 @@ typedef struct dynamic_allocator {
 
 } dynamic_allocator_t;
 
-static int da_init(dynamic_allocator_t **a);
+static ret_t da_init(dynamic_allocator_t **a);
 
-static int da_realloc(dynamic_allocator_t *a, size_t size) {
+static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
     if (a == NULL) {
         LOG_WARN("Empty dynamic_allocator::ptr");
         DA_TRACE(a);
@@ -897,14 +1084,14 @@ static int da_realloc(dynamic_allocator_t *a, size_t size) {
     } else if (size > a->size) {
         size_t ds = size - a->size;
         a->ptr = realloc(a->ptr, size);
-        memset(a->ptr+a->size, 0, ds);
+        memset(a->ptr + a->size, 0, ds);
         a->size = size;
     }
 
     return ST_OK;
 }
 
-static int da_init_n(dynamic_allocator_t **a, size_t size) {
+static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
     *a = zalloc(sizeof(dynamic_allocator_t));
 
     (*a)->ptr = zalloc(size);
@@ -917,12 +1104,12 @@ static int da_init_n(dynamic_allocator_t **a, size_t size) {
     return ST_OK;
 }
 
-static int da_init(dynamic_allocator_t **a) {
+static ret_t da_init(dynamic_allocator_t **a) {
 
     return da_init_n(a, STRING_INIT_BUFFER);
 }
 
-static int da_release(dynamic_allocator_t **a) {
+static ret_t da_release(dynamic_allocator_t **a) {
     if (NULLPP(a))
         return ST_EMPTY;
 
@@ -930,14 +1117,14 @@ static int da_release(dynamic_allocator_t **a) {
         LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
                   (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
 
-        safe_free((void **) &(*a)->ptr);
+        if ((*a)->ptr) free((*a)->ptr);
         safe_free((void **) a);
     }
 
     return ST_OK;
 }
 
-static int da_fit(dynamic_allocator_t *a) {
+static ret_t da_fit(dynamic_allocator_t *a) {
 
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
@@ -952,7 +1139,7 @@ static int da_fit(dynamic_allocator_t *a) {
     return 0;
 }
 
-static int da_crop_tail(dynamic_allocator_t *a, size_t pos) {
+static ret_t da_crop_tail(dynamic_allocator_t *a, size_t pos) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
               a, a->ptr, a->size, a->used, a->mul, pos);
 
@@ -976,7 +1163,7 @@ static int da_crop_tail(dynamic_allocator_t *a, size_t pos) {
     return ST_OK;
 }
 
-static int da_pop_head(dynamic_allocator_t *a, size_t n) {
+static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; n=%lu",
               a, a->ptr, a->size, a->used, a->mul, n);
 
@@ -996,14 +1183,14 @@ static int da_pop_head(dynamic_allocator_t *a, size_t n) {
     return ST_OK;
 }
 
-static int da_check_size(dynamic_allocator_t *a, size_t new_size) {
+static ret_t da_check_size(dynamic_allocator_t *a, size_t new_size) {
     if (a->size < a->used + new_size)
         da_realloc(a, a->used + new_size);
 
     return 0;
 }
 
-static int da_append(dynamic_allocator_t *a, const char *data, size_t size) {
+static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
 
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
@@ -1022,7 +1209,7 @@ static int da_append(dynamic_allocator_t *a, const char *data, size_t size) {
     return ST_OK;
 }
 
-static int da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
+static ret_t da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; input begin=%lu end=%lu",
               a, a->ptr, a->size, a->used, a->mul, begin, end);
 
@@ -1048,12 +1235,12 @@ static int da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_all
 
 }
 
-static int da_sub(dynamic_allocator_t *a, size_t pos, dynamic_allocator_t **b) {
+static ret_t da_sub(dynamic_allocator_t *a, size_t pos, dynamic_allocator_t **b) {
     return da_sub2(a, pos, a->used, b);
 }
 
 
-static int da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
+static ret_t da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
@@ -1070,12 +1257,32 @@ static int da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     return ST_OK;
 }
 
-static int da_merge(dynamic_allocator_t *a, dynamic_allocator_t *b) {
-    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
-              a, a->ptr, a->size, a->used, a->mul);
+static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
+    DA_TRACE(a);
+    DA_TRACE((*b));
 
-    LOG_TRACE("b b[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
-              b, b->ptr, b->size, b->used, b->mul);
+    da_fit(a);
+    da_fit(*b);
+
+    size_t nb_size = a->size + (*b)->size;
+
+    da_realloc(a, nb_size);
+
+    mcopy(a->ptr + a->used, (*b)->ptr, (*b)->size);
+
+    a->used += (*b)->size;
+
+    da_release(b);
+
+    DA_TRACE(a);
+    ASSERT(*b == NULL);
+
+    return ST_OK;
+}
+
+static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+    DA_TRACE(a);
+    DA_TRACE(b);
 
     da_fit(a);
     da_fit(b);
@@ -1088,15 +1295,14 @@ static int da_merge(dynamic_allocator_t *a, dynamic_allocator_t *b) {
 
     a->used += b->size;
 
-    da_release(&b);
 
-    LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
-              a, a->ptr, a->size, a->used, a->mul);
+    DA_TRACE(a);
+    DA_TRACE(b);
 
     return ST_OK;
 }
 
-static int da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
+static ret_t da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu n=%lu",
               a, a->ptr, a->size, a->used, a->mul, n);
 
@@ -1112,8 +1318,9 @@ static int da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
 
     da_realloc(a, pos - 1);
 
-    da_merge(a, b);
+    da_merge(a, &b);
 
+    ASSERT(b == NULL);
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
@@ -1121,11 +1328,11 @@ static int da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
 
 }
 
-static int da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+static ret_t da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
     return memcmp(a->ptr, b->ptr, MIN(a->used, b->used));
 }
 
-static void test_dynamic_allocator() {
+static void da_test() {
     dynamic_allocator_t *da = NULL;
     dynamic_allocator_t *db = NULL;
     dynamic_allocator_t *dc = NULL;
@@ -1163,17 +1370,15 @@ static void test_dynamic_allocator() {
     ASSERT(da_compare(db, db) == 0);
 
     da_init(&de);
-    da_append(de, "My ", 3);
+    da_append(de, " My ", 4);
     da_sub2(da, 8, 12, &df);
     da_append(df, "!", 1);
 
     da_remove_seq(da, 8, 6);
 
-    da_merge(de, df);
+    da_merge(de, &df);
 
-    da_append(de, " ", 1);
-
-    da_merge(da, de);
+    da_concant(da, de);
 
 
     da_release(&da);
@@ -1184,6 +1389,10 @@ static void test_dynamic_allocator() {
     ASSERT(NULL == dc);
     da_release(&dd);
     ASSERT(NULL == dd);
+    da_release(&de);
+    ASSERT(NULL == de);
+    da_release(&df);
+    ASSERT(NULL == df);
 }
 
 //=======================================================================
@@ -1207,16 +1416,16 @@ typedef struct list {
 
 
 static void list_init(list_t **l, size_t elem_size) {
-    *l = allocz(NULL, sizeof(list_t));
+    *l = zalloc(sizeof(list_t));
     (*l)->elem_size = elem_size;
 }
 
 static void node_init(list_node_t **node) {
-    *node = allocz(NULL, sizeof(list_node_t));
+    *node = zalloc(sizeof(list_node_t));
 }
 
 static void *list_dub_data(list_t *l, void *data) {
-    void *v = allocz(NULL, l->elem_size);
+    void *v = zalloc(l->elem_size);
     memcpy(v, data, l->elem_size);
     return v;
 }
@@ -1310,7 +1519,7 @@ static list_node_t *list_prev(list_node_t *node) {
     return node->prev;
 }
 
-static int list_release(list_t **l) {
+static ret_t list_release(list_t **l) {
     if (NULLPP(l) && *l == NULL)
         return ST_EMPTY;
 
@@ -1332,7 +1541,7 @@ static int list_release(list_t **l) {
 
 }
 
-static int list_merge(list_t *a, list_t *b) {
+static ret_t list_merge(list_t *a, list_t *b) {
     if (a->size == 0 && b->size == 0)
         return ST_ERR;
 
@@ -1345,7 +1554,7 @@ static int list_merge(list_t *a, list_t *b) {
     return ST_OK;
 }
 
-static int list_remove(list_t *l, void *data) {
+static ret_t list_remove(list_t *l, void *data) {
     list_node_t *head = l->head;
 
     while (head) {
@@ -1371,7 +1580,7 @@ static int list_remove(list_t *l, void *data) {
 typedef void(*list_traverse_cb)(list_node_t *);
 
 
-static int list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
+static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
     if (!l) return ST_EMPTY;
 
 
@@ -1394,15 +1603,15 @@ typedef struct vector {
     size_t elem_size;
 } vector_t;
 
-static int vector_init(vector_t **vec, size_t elem_size) {
-    *vec = allocz(NULL, sizeof(vector_t));
+static ret_t vector_init(vector_t **vec, size_t elem_size) {
+    *vec = zalloc(sizeof(vector_t));
     da_init_n(&(*vec)->alloc, elem_size * 10);
     (*vec)->elem_size = elem_size;
 
     return ST_OK;
 }
 
-static int vector_release(vector_t *vec) {
+static ret_t vector_release(vector_t *vec) {
     da_release(&vec->alloc);
     free(vec);
 
@@ -1411,7 +1620,7 @@ static int vector_release(vector_t *vec) {
 
 static size_t vector_size(vector_t *vec) { return vec->size; }
 
-static int vector_add(vector_t *vec, const void *elem) {
+static ret_t vector_add(vector_t *vec, const void *elem) {
     da_append(vec->alloc, (const char *) elem, vec->elem_size);
     vec->size++;
 
@@ -1419,7 +1628,7 @@ static int vector_add(vector_t *vec, const void *elem) {
 }
 
 
-static int vector_get(vector_t *vec, size_t idx, void **elem) {
+static ret_t vector_get(vector_t *vec, size_t idx, void **elem) {
     if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
@@ -1428,7 +1637,7 @@ static int vector_get(vector_t *vec, size_t idx, void **elem) {
     return ST_OK;
 }
 
-static int vector_set(vector_t *vec, size_t idx, void *elem) {
+static ret_t vector_set(vector_t *vec, size_t idx, void *elem) {
     if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
@@ -1456,10 +1665,13 @@ static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
 //=======================================================================
 
 typedef struct {
-    dynamic_allocator_t *alloc;
-    size_t size;
-    uint64_t nt;
+    uint8_t _[sizeof(dynamic_allocator_t)];
+
 } string;
+
+
+#define _da(x) ((dynamic_allocator_t*)x)
+#define _dap(x) ((dynamic_allocator_t**)x)
 
 typedef struct skey_value {
     string *key;
@@ -1468,138 +1680,82 @@ typedef struct skey_value {
 
 static string *string_null = NULL;
 
-static int string_init(string **sp) {
-    *sp = allocz(NULL, sizeof(string));
-    da_init(&((*sp)->alloc));
-    (*sp)->size = 0;
-    (*sp)->nt = false;
-
-    return ST_OK;
+static ret_t string_init(string **sp) {
+    return da_init(_dap(sp));
 }
 
-static int string_release(string **s) {
-    if (s && *s) {
-        da_release(&(*s)->alloc);
+static ret_t string_release(string **s) {
+    return da_release(_dap(s));
+}
 
-        safe_free((void **) s);
+static const char *string_cdata(string *s) {
+    return _da(s)->ptr;
+}
 
+static size_t string_size(string *s) {
+    return _da(s)->used;
+}
+
+static char string_char(string *s, size_t idx) {
+    if (idx > string_size(s)) {
+        LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
+        return (char) -1;
     }
 
+    return _da(s)->ptr[idx];
+}
+
+static ret_t string_create_nt(string *s, char **buff) {
+    size_t ssize = string_size(s);
+    *buff = zalloc(ssize + 1);
+    memcpy(*buff, string_cdata(s), ssize);
+
     return ST_OK;
 }
 
-static int string_dub(string *s, string **ns) {
-    *ns = allocz(NULL, sizeof(string));
-    da_dub(s->alloc, &(*ns)->alloc);
-
-    (*ns)->size = s->size;
-    (*ns)->nt = s->nt;
-
-    return ST_OK;
+static ret_t string_dub(string *s, string **ns) {
+    return da_dub(_da(s), _dap(ns));
 }
 
-static int string_append(string *s, const char *str) {
+static ret_t string_append(string *s, const char *str) {
     size_t len = strlen(str);
-    s->size += len;
-    s->nt = false;
-    da_append(s->alloc, str, len);
-
-    return ST_OK;
-
-}
-
-//append null-terminated string
-static int string_appendz(string *s, const char *str) {
-    size_t len = strlen(str) + 1;
-    s->size += len;
-    s->nt = true;
-    da_append(s->alloc, str, len);
-
-    return ST_OK;
+    return da_append(_da(s), str, len);
 
 }
 
 static void string_init_globals() {
     string_init(&string_null);
-    string_appendz(string_null, "(null)");
+    string_append(string_null, "(null)");
 }
 
 
-static int string_appendn(string *s, const char *str, size_t len) {
-    s->size += len;
-    s->nt = false;
-    da_append(s->alloc, str, len);
-
-    return ST_OK;
+static ret_t string_appendn(string *s, const char *str, size_t len) {
+    return da_append(_da(s), str, len);
 
 }
 
-static int string_appendnz(string *s, const char *str, size_t len) {
-    s->size += len;
-    s->nt = true;
-    da_append(s->alloc, str, len);
-    da_append(s->alloc, "\0", 1);
-
-    return ST_OK;
-
-}
-
-static int string_create(string **s, const char *str) {
+static ret_t string_create(string **s, const char *str) {
     string_init(s);
 
-    string_append(*s, str);
-
-    return ST_OK;
+    return string_append(*s, str);
 }
 
-static int string_createz(string **s, const char *str) {
-    string_init(s);
-
-    string_appendz(*s, str);
-
-    return ST_OK;
+static ret_t string_add(string *a, string *b) {
+    return da_concant(_da(a), _da(b));
 }
 
-static char string_get_ch(string *s, size_t idx) {
-    if (idx > s->size) {
-        LOG_ERROR("Index is out of bound %lu > %lu", idx, s->size);
-        return 0;
-    }
-
-    return s->alloc->ptr[idx];
+static ret_t string_pop_head(string *s, size_t n) {
+    return da_pop_head(_da(s), n);
 }
 
-static int string_add(string *a, string *b) {
-    da_merge(a->alloc, b->alloc);
-    a->size += b->size;
-    a->nt = b->nt;
-    return ST_OK;
-}
-
-static int string_pop_head(string *s) {
-    if (s && s->alloc && s->alloc->ptr && s->size > 2) {
-        --s->alloc->used;
-        --s->size;
-        da_fit(s->alloc);
-
-        if (s->nt)
-            s->alloc->ptr[s->alloc->size - 1] = '\0';
-
-        return ST_OK;
-    }
-
-    return ST_ERR;
-}
-
-static int string_crop_tail(string *s) {
-    da_crop_tail(s->alloc, 1);
-
-    return ST_OK;
+static ret_t string_crop_tail(string *s, size_t n) {
+    return da_crop_tail(_da(s), n);
 }
 
 static size_t string_find_last_char(string *s, char ch) {
-    for (size_t i = s->size; i != 0; --i) {
-        char cur = s->alloc->ptr[i];
+    size_t ssize = string_size(s);
+    for (size_t i = ssize; i != 0; --i) {
+        char cur = string_char(s, i);
         if (cur == ch)
             return i;
     }
@@ -1608,50 +1764,48 @@ static size_t string_find_last_char(string *s, char ch) {
 
 }
 
-static int string_starts_withz(string *s, const char *str) {
+static ret_t string_starts_with(string *s, const char *str) {
     size_t str_len = strlen(str);
-    if (str_len > s->size)
+    if (str_len > string_size(s))
         return ST_SIZE_EXCEED;
 
-    if (memcmp(s->alloc->ptr, str, str_len) == 0)
+    if (memcmp(string_cdata(s), str, str_len) == 0)
         return ST_OK;
 
     return ST_NOT_FOUND;
 }
 
-static int string_compare(string *a, string *b) {
-    if (a->size != b->size)
-        return ST_NOT_FOUND;
-
-    if (memcmp(a->alloc->ptr, b->alloc->ptr, a->size) == 0)
-        return ST_OK;
-
-
-    return ST_NOT_FOUND;
+static ret_t string_compare(string *a, string *b) {
+    return da_compare(_da(a), _da(b));
 }
 
-
-static int string_comparez(string *a, const char *cmp) {
-    return strncmp(a->alloc->ptr, cmp, strlen(cmp));
+static ret_t string_comparez(string *a, const char *str) {
+    return string_starts_with(a, str);
 }
 
-static void string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
-    if ((beg > 0 && beg <= s->size) && (end > 0 && end <= s->size)) EXIT_ERROR("Indexes are out of bound");
+static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
+    size_t ssize = string_size(s);
+    if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
+        LOG_ERROR("Indexes are out of bound");
+        return ST_OUT_OF_RANGE;
+    }
 
-    *sb = s->alloc->ptr + beg;
-    *se = s->alloc->ptr + end;
+    *sb = _da(s)->ptr + beg;
+    *se = _da(s)->ptr + end;
+
+    return ST_OK;
 }
 
 static void string_map_string(string *s, char **sb, char **se) {
-    string_map_region(s, 0, s->size, sb, se);
+    string_map_region(s, 0, string_size(s), sb, se);
 }
 
-static int string_to_u64(string *s, uint64_t *ul) {
+static ret_t string_to_u64(string *s, uint64_t *ul) {
 
     uint64_t res = 0;
-
-    for (size_t i = 0; i < s->size; ++i)
-        res = res * 10 + string_get_ch(s, i) - '0';
+    size_t ssize = string_size(s);
+    for (size_t i = 0; i < ssize; ++i)
+        res = res * 10 + string_char(s, i) - '0';
 
     *ul = res;
 
@@ -1659,12 +1813,46 @@ static int string_to_u64(string *s, uint64_t *ul) {
 
 }
 
-#define string_print(a) LOG_INFO("%.*s",a->size, a->alloc->ptr);
-#define string_printd(a) LOG_DEBUG("%.*s",a->size, a->alloc->ptr);
+#define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
+#define string_printd(a) LOG_DEBUG("%.*s", string_size(a), string_cdata(a));
+#define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
+
+static void string_test() {
+    static const char *str1 = "Hello, World!";
+    static const char *str2 = "What's up, Dude?";
+    ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
+
+    string *a = NULL;
+    string *b = NULL;
+//    string* c = NULL;
+//    string* d = NULL;
+
+
+    ASSERT(string_init(&a) == ST_OK);
+    ASSERT(string_release(&a) == ST_OK);
+
+    ASSERT(string_create(&a, str1));
+    ASSERT(string_comparez(a, str1));
+
+    ASSERT(string_dub(a, &b) == ST_OK);
+    ASSERT(string_compare(a, b) == 0);
+
+    ASSERT(string_append(b, str2) == ST_OK);
+
+    string_print(b);
+
+    ASSERT(string_add(b, a) == ST_OK);
+
+    string_printt(a);
+    string_print(b);
+
+
+}
 
 //=======================================================================
 // SLIST
 //=======================================================================
+
 
 typedef struct snode {
     string *s;
@@ -1684,12 +1872,12 @@ typedef struct {
 
 
 static void slist_init(slist **sl) {
-    *sl = allocz(NULL, sizeof(slist));
+    *sl = zalloc(sizeof(slist));
     (*sl)->delm = ',';
 }
 
 static void snode_init(snode **node) {
-    *node = allocz(NULL, sizeof(snode));
+    *node = zalloc(sizeof(snode));
 }
 
 
@@ -1757,7 +1945,7 @@ static string *slist_next(slist *sl) {
     return s;
 }
 
-static int slist_release(slist **sl, bool srelease) {
+static ret_t slist_release(slist **sl, bool srelease) {
     if (sl && *sl) {
         snode *head = (*sl)->head;
         while (head) {
@@ -1808,7 +1996,7 @@ static void slist_remove(slist *sl, string *s) {
     }
 }
 
-static int slist_find_eq(slist *sl, string *s, string **found) {
+static ret_t slist_find_eq(slist *sl, string *s, string **found) {
     snode *head = sl->head;
 
     while (head) {
@@ -1850,17 +2038,14 @@ static void slist_rfprint(slist *sl, FILE *output) {
     }
 }
 
-static int string_remove_seq(string *s, size_t pos, size_t n) {
-    da_remove_seq(s->alloc, pos, n);
-    s->size = s->alloc->used;
-
-    return ST_OK;
+static ret_t string_remove_seq(string *s, size_t pos, size_t n) {
+    return da_remove_seq(_da(s), pos, n);
 }
 
-static int string_remove_dubseq(string *s, char delm) {
+static ret_t string_remove_dubseq(string *s, char delm) {
     size_t j = 0;
-    while (j < s->size) {
-        char *cur = s->alloc->ptr;
+    while (j < string_size(s)) {
+        const char *cur = string_cdata(s);
         size_t i = 0;
         size_t n = 0;
 
@@ -1868,13 +2053,16 @@ static int string_remove_dubseq(string *s, char delm) {
 
 
         if (n > 1) {
-            string_remove_seq(s, j + i, n);
+            int res = ST_OK;
+            if ((res = string_remove_seq(s, j + i, n) != ST_OK))
+                return res;
+
             j = 0; // skip due to internal buffer changed
         }
 
         ++j;
 
-        if (j >= s->size)
+        if (j >= string_size(s))
             break;
 
     }
@@ -1893,13 +2081,13 @@ static bool check_strip_dict(char ch) {
     return false;
 }
 
-static int string_rstrip(string *s) {
-    while (s->size > 0) {
-        size_t idx = s->size - 1;
-        char sch = string_get_ch(s, idx);
+static ret_t string_rstrip(string *s) {
+    while (string_size(s) > 0) {
+        size_t idx = string_size(s) - 1;
+        char sch = string_char(s, idx);
 
         if (check_strip_dict(sch))
-            string_pop_head(s);
+            string_pop_head(s, 1);
         else
             return ST_OK;
 
@@ -1908,21 +2096,21 @@ static int string_rstrip(string *s) {
     return ST_OK;
 }
 
-static int string_lstrip(string *s) {
-    for (size_t j = 0; j < s->size; ++j) {
+static ret_t string_lstrip(string *s) {
+    for (size_t j = 0; j < string_size(s); ++j) {
 
-        char sch = string_get_ch(s, j);
+        char sch = string_char(s, j);
         if (check_strip_dict(sch))
-            string_crop_tail(s);
+            string_crop_tail(s, 1);
         else
             return ST_OK;
     }
     return ST_OK;
 }
 
-static int string_strip(string *s) {
+static ret_t string_strip(string *s) {
 
-    if (s->size < 3)
+    if (string_size(s) < 3)
         return ST_SIZE_EXCEED;
 
     string_rstrip(s);
@@ -1939,18 +2127,15 @@ static bool check_strip_dict_ws(char ch) {
     return false;
 }
 
-static int string_rstrip_ws(string *s) {
-    while (s->size > 2) {
+static ret_t string_rstrip_ws(string *s) {
+    while (string_size(s) > 2) {
 
-        size_t idx = s->size - 1;
-        char sch = string_get_ch(s, idx);
+        size_t idx = string_size(s) - 1;
+        char sch = string_char(s, idx);
 
-        uint64_t nt = s->nt;
         if (check_strip_dict_ws(sch)) {
-            s->nt = 0;
-            string_pop_head(s);
+            string_pop_head(s, 1);
         } else {
-            s->nt = nt;
             return ST_OK;
         }
 
@@ -1959,8 +2144,8 @@ static int string_rstrip_ws(string *s) {
     return ST_OK;
 }
 
-static int string_split(string *s, char delm, slist **sl) {
-    if (s->size == 0)
+static ret_t string_split(string *s, char delm, slist **sl) {
+    if (string_size(s) == 0)
         return ST_EMPTY;
 
 
@@ -1982,7 +2167,7 @@ static int string_split(string *s, char delm, slist **sl) {
 
             string *ss = NULL;
             string_init(&ss);
-            string_appendnz(ss, cb, (size_t) (ccur - cb));
+            string_appendn(ss, cb, (size_t) (ccur - cb));
 
             slist_append(*sl, ss);
 
@@ -1994,6 +2179,7 @@ static int string_split(string *s, char delm, slist **sl) {
 
     return ST_OK;
 }
+
 
 //=============================================================================================
 // HASH BINARY TREE
@@ -2009,18 +2195,18 @@ typedef struct bt_node {
 
 } bt_node_t;
 
-static int bt_node_create(bt_node_t **bt, uint64_t hash, void *data, size_t size) {
-    *bt = allocz(NULL, sizeof(bt_node_t));
+static ret_t bt_node_create(bt_node_t **bt, uint64_t hash, void *data, size_t size) {
+    *bt = zalloc(sizeof(bt_node_t));
     bt_node_t *b = *bt;
     b->hash_key = hash;
 
-    b->data = allocz(NULL, size);
+    b->data = zalloc(size);
     memcpy(b->data, data, size);
 
     return ST_OK;
 }
 
-static int bt_node_release(bt_node_t **bt) {
+static ret_t bt_node_release(bt_node_t **bt) {
 
     if (NULLPP(bt))
         return ST_EMPTY;
@@ -2039,14 +2225,14 @@ static int bt_node_release(bt_node_t **bt) {
 }
 
 
-static int bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, size_t size) {
+static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, size_t size) {
     if (*bt == NULL) {
-        *bt = allocz(NULL, sizeof(bt_node_t));
+        *bt = zalloc(sizeof(bt_node_t));
         bt_node_t *b = *bt;
         b->hash_key = hash;
         b->prev = prev;
 
-        b->data = allocz(NULL, size);
+        b->data = zalloc(size);
         memcpy(b->data, data, size);
 
         return ST_OK;
@@ -2060,7 +2246,7 @@ static int bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *dat
         else {
             SAFE_RELEASE(b->data);
 
-            b->data = allocz(NULL, size);
+            b->data = zalloc(size);
             memcpy(b->data, data, size);
 
             return ST_OK;
@@ -2070,7 +2256,7 @@ static int bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *dat
 }
 
 
-static int bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
+static ret_t bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
     if (bt == NULL)
         return ST_NOT_FOUND;
 
@@ -2084,7 +2270,7 @@ static int bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
     }
 }
 
-static int bt_node_left(bt_node_t *bt, bt_node_t **left) {
+static ret_t bt_node_left(bt_node_t *bt, bt_node_t **left) {
     bt_node_t *cur = bt;
 
     while (cur && cur->left)
@@ -2114,14 +2300,14 @@ typedef struct binary_tree {
 } binary_tree_t;
 
 
-static int bt_init(binary_tree_t **bt, size_t elem_size) {
-    *bt = allocz(NULL, sizeof(binary_tree_t));
+static ret_t bt_init(binary_tree_t **bt, size_t elem_size) {
+    *bt = zalloc(sizeof(binary_tree_t));
     (*bt)->elem_size = elem_size;
 
     return ST_OK;
 }
 
-static int bt_release(binary_tree_t **bt) {
+static ret_t bt_release(binary_tree_t **bt) {
     if (NULLPP(bt))
         return ST_EMPTY;
 
@@ -2149,7 +2335,7 @@ static str_int_t heap_str_int_decode(void *p) {
     return i;
 }
 
-static int bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
+static ret_t bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
     uint64_t hash = crc64s(key);
     str_int_t data;
     data.str = key;
@@ -2157,7 +2343,7 @@ static int bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
     return bt_node_set(&bt->head, NULL, hash, &data, bt->elem_size);
 }
 
-static int bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
+static ret_t bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
     uint64_t hash = crc64s(key);
     void *p = NULL;
     int ret = bt_node_get(bt->head, hash, &p);
@@ -2170,7 +2356,7 @@ static int bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
 }
 
 static void bt_si_traverse_cb(bt_node_t *node) {
-    static int counter = 1;
+    static ret_t counter = 1;
     str_int_t i = heap_str_int_decode(node->data);
 
     LOG_DEBUG("[%d][%08lX] %s : 0x%lX", counter++, node->hash_key, i.str, i.i);
@@ -2184,6 +2370,22 @@ static void bt_si_traverse(binary_tree_t *bt) {
 //=============================================================================================
 // TESTS
 //=============================================================================================
+
+
+static ret_t test_slist();
+
+static void test_hash_bt();
+
+static void da_test();
+
+static void string_test();
+
+static void test_ret();
+
+
+static void run_tests() {
+    test_ret();
+}
 
 static void test_hash_bt() {
     binary_tree_t *bt;
@@ -2344,8 +2546,7 @@ static void test_hash_bt() {
     ASSERT(NULLPP(bt));
 }
 
-
-static int test_slist() {
+static ret_t test_slist() {
     slist *sl = NULL;
     slist_init(&sl);
 
@@ -2519,7 +2720,6 @@ static int test_slist() {
 
 }
 
-
 //========================================================================
 
 
@@ -2629,7 +2829,7 @@ static void fd_file_mmap(int fd, string *s) {
     close(fd);
 }
 
-static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
+static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     FILE *fpipe;
 
     if (!(fpipe = popen(cmd, "r")))
@@ -2644,7 +2844,7 @@ static int cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     while (fgets(line, sizeof(line), fpipe)) {
         string *s = NULL;
 
-        string_createz(&s, line);
+        string_create(&s, line);
         slist_append(sl, s);
     }
 
@@ -2683,15 +2883,15 @@ typedef struct {
 
 
 static void df_init(df_t **df) {
-    *df = allocz(NULL, sizeof(df_t));
-    (*df)->stats = allocz(NULL, sizeof(hashtable_t));
+    *df = zalloc(sizeof(df_t));
+    (*df)->stats = zalloc(sizeof(hashtable_t));
     (*df)->skip_first = 1;
 }
 
-static int ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
+static ret_t ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
 
     ht_key_t *hkey = NULL;
-    uint64_t hash = crc64(0, (uint8_t *) key->alloc->ptr, key->size);
+    uint64_t hash = crc64(0, (const uint8_t *) string_cdata(key), string_size(key));
     ht_create_key_i(hash, &hkey);
 
     ht_value_t *val = NULL;
@@ -2713,7 +2913,7 @@ static void df_callback(void *ctx, slist *lines) {
     slist_init_current(lines);
     while ((tk = slist_next(lines)) != NULL) {
 
-        if (string_starts_withz(tk, "/dev/") != ST_OK)
+        if (string_starts_with(tk, "/dev/") != ST_OK)
             continue;
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
@@ -2731,7 +2931,7 @@ static void df_callback(void *ctx, slist *lines) {
         //==============================
         // init df_stat
 
-        df_stat_t *stat = allocz(NULL, sizeof(df_stat_t));
+        df_stat_t *stat = zalloc(sizeof(df_stat_t));
 
 
         //==============================
@@ -2759,7 +2959,7 @@ static void df_callback(void *ctx, slist *lines) {
                     string_to_u64(s, &stat->avail);
                     break;
                 case 4: {
-                    string_pop_head(s);
+                    string_pop_head(s, 1);
                     string_to_u64(s, &stat->use);
                     break;
                 }
@@ -2788,7 +2988,7 @@ static void df_callback(void *ctx, slist *lines) {
 static void df_execute(df_t *dfs) {
 
     string *s;
-    string_createz(&s, "df --block-size=1");
+    string_create(&s, "df --block-size=1");
 
     char *cmd = NULL;
     char *cmd_end;
@@ -2828,7 +3028,7 @@ enum {
 };
 
 
-static int sm_token(char ch) {
+static ret_t sm_token(char ch) {
     if (ch == '"') return SM_QUOTE;
     if (ch == '=') return SM_EQUAL;
     if (isspace(ch)) return SM_SPACE;
@@ -2843,15 +3043,15 @@ typedef struct system {
 } system_t;
 
 
-static int system_init(system_t **sys) {
-    *sys = allocz(NULL, sizeof(system_t));
+static ret_t system_init(system_t **sys) {
+    *sys = zalloc(sizeof(system_t));
     ht_init(&(*sys)->blk);
 
     return ST_OK;
 }
 
-static int vector_add_kv(vector_t *vec, string *key, string *val) {
-    skey_value_t *kv = allocz(NULL, sizeof(skey_value_t));
+static ret_t vector_add_kv(vector_t *vec, string *key, string *val) {
+    skey_value_t *kv = zalloc(sizeof(skey_value_t));
     string_dub(key, &kv->key);
     string_dub(val, &kv->value);
 
@@ -2860,10 +3060,10 @@ static int vector_add_kv(vector_t *vec, string *key, string *val) {
     return ST_OK;
 }
 
-static int ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
+static ret_t ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
 
     ht_key_t *hkey = NULL;
-    uint64_t hash = crc64(0, (uint8_t *) key->alloc->ptr, key->size);
+    uint64_t hash = crc64(0, (const uint8_t *) string_cdata(key), string_size(key));
     ht_create_key_i(hash, &hkey);
 
     ht_value_t *val = NULL;
@@ -2879,7 +3079,7 @@ static int ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
 /* Compile the regular expression described by "regex_text" into
    "r". */
 
-static int compile_regex(regex_t *r, const char *regex_text) {
+static ret_t compile_regex(regex_t *r, const char *regex_text) {
     int status = regcomp(r, regex_text, REG_EXTENDED | REG_NEWLINE);
     if (status != 0) {
         char error_message[MAX_ERROR_MSG];
@@ -2896,7 +3096,7 @@ static int compile_regex(regex_t *r, const char *regex_text) {
   expression in "r".
  */
 
-static int match_regex(regex_t *r, const char *to_match) {
+static ret_t match_regex(regex_t *r, const char *to_match) {
     /* "P" is a pointer into the string which points to the end of the
        previous match. */
     const char *p = to_match;
@@ -2952,7 +3152,12 @@ static void sblk_callback(void *ctx, slist *lines) {
             regex_t re;
             compile_regex(&re, "(\\w+)=\"([[:alnum:][:space:]-]*)\"");
 
-            match_regex(&re, tk->alloc->ptr);
+            char *tkp = NULL;
+            string_create_nt(tk, &tkp);
+
+            match_regex(&re, tkp);
+
+            free(tkp);
 
             //================================
         }
@@ -3034,7 +3239,7 @@ static void sblk_callback(void *ctx, slist *lines) {
 
 }
 
-static int sblk_execute(sblkid_t *sblk) {
+static ret_t sblk_execute(sblkid_t *sblk) {
     static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
 
     string *cmd = NULL;
@@ -3048,7 +3253,7 @@ static int sblk_execute(sblkid_t *sblk) {
         string_append(cmd, options[i]);
     }
 
-    string_appendz(cmd, "");
+    string_append(cmd, "");
 
 
     char *ccmd = NULL;
@@ -3081,7 +3286,7 @@ typedef struct device {
     vector_t childs;
 } device_t;
 
-//static int read_all_file(const char* path) {
+//static ret_t read_all_file(const char* path) {
 //    FILE* f;
 //
 //    if(!(f = fopen(path, "r"))
@@ -3357,7 +3562,7 @@ typedef struct device {
 //    }
 //};
 //
-//static int statfs_dev() {
+//static ret_t statfs_dev() {
 //    const char *dev = "/usr/bin/gcc";
 //    struct statvfs64 fs;
 //
@@ -3580,7 +3785,8 @@ void scan_blk(uint64_t hash, ht_key_t *key, ht_value_t *val) {
     for (size_t i = 0; i < sz; ++i) {
         skey_value_t *kv = NULL;
         vector_get(vec, i, (void **) &kv);
-        fprintf(stderr, "[scan_blk][0x%08lx] %s=%s\n", hash, kv->key->alloc->ptr, kv->value->alloc->ptr);
+        fprintf(stderr, "[scan_blk][0x%08lx] %.*s=%.*s\n", hash, (int) string_size(kv->key), string_cdata(kv->key),
+                (int) string_size(kv->value), string_cdata(kv->value));
     }
 
 
@@ -3592,7 +3798,8 @@ void scan_df(uint64_t hash, ht_key_t *key, ht_value_t *val) {
     df_stat_t *stat = (df_stat_t *) val->ptr;
 
 
-    fprintf(stderr, "[scan_df][0x%08lx][%s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash, stat->dev->alloc->ptr,
+    fprintf(stderr, "[scan_df][0x%08lx][%.*s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash,
+            (int) string_size(stat->dev), string_cdata(stat->dev),
             stat->total, stat->used, stat->avail, stat->use);
 
 
@@ -3674,9 +3881,7 @@ int main() {
     enable_stderr(true);
 
 
-    test_dynamic_allocator();
-    //test_hash_bt();
-    //test_slist();
+    run_tests();
 
 //
 //    struct A* a = OBJECT_CREATE(struct A);
