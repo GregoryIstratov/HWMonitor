@@ -391,7 +391,7 @@ static ret_t _test_ret1() {
 }
 
 static void test_ret() {
-    
+
     ASSERT_EQ(sizeof(ret_f_t), sizeof(ret_t));
 
     ret_t ret = _test_ret1();
