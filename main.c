@@ -60,6 +60,8 @@ static void _log(FILE* out, ...)
 #define LOG_ASSERT(...) (_log(__FILE__, __LINE__, __func__, LOG_ASSERT, __VA_ARGS__))
 #define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
 
+#define ASSERT_EQ(a, b) ((a == b)?__ASSERT_VOID_CAST (0): LOG_ASSERT("%s != %s [%lu] != [%lu]", #a, #b, a, b))
+
 //#define LOG_SHOW_TIME
 //#define LOG_SHOW_DATE
 //#define LOG_SHOW_THREAD
@@ -260,72 +262,55 @@ enum {
 // RETURN MSG
 //======================================================================================================================
 // 64 bit
-// [16 bit reserved]    [16 bit value data] [8 bit depth]   [16 bit idx msg]     [8 bit code]
-// [................]   [.................] [........]      [................]   [........]
-// [0xFFFF000000000000] [0xFFFF00000000]    [0xFF000000]    [0xFFFF00]           [0xFF]
+// [16 bit reserved][16 bit value data][16 bit idx msg][8 bit depth][8 bit code]
+
 
 #define RET_MULTITHREADED
 
 typedef uint64_t ret_t;
 
-typedef union ret_field
+typedef struct ret_field
 {
-    uint8_t code;
-    uint16_t idx;
-    uint8_t depth;
-    uint16_t data;
-    uint16_t reserved;
-    uint64_t v;
-} ret_field_t;
+    union {
+        struct{
+            uint8_t code;
+            uint8_t depth;
+            uint16_t idx;
+            uint16_t data;
+            uint16_t reserved;
+        };
+        ret_t r;
+    };
+
+} ret_f_t;
 
 pthread_spinlock_t gmsg_tab_lock;
 static const char *gmsg_tab[UINT16_MAX]; // about 500 kb, //TODO make it dynamic
-static uint16_t gmsg_idx = 3245;
+static uint16_t gmsg_idx = 1;
 
-#define return_trace(ret) LOG_TRACE("[%016d][%016d][%08d][%016d][%08d]", (uint16_t)((ret & 0xFFFF000000000000)>>48), \
- (uint16_t)((ret & 0xFFFF00000000)>>32),  (uint8_t)((ret & 0xFF000000)>>24), (uint16_t)((ret & 0xFFFF00)>>8), (uint8_t)ret);
+#define return_trace(ret) LOG_TRACE("[%016d][%016d][%08d][%016d][%08d]", ret.reserved, \
+ ret.data, ret.depth, ret.idx, ret.code);
 
-
-static uint8_t return_code(ret_t ret) {
-    return (uint8_t) ret;
-}
-
-static uint16_t return_msg_idx(ret_t ret) {
-    return (uint16_t) (ret>>8);
-}
-
-static uint8_t return_depth(ret_t ret) {
-    return (uint8_t) (ret>>24UL);
-}
-
-static uint16_t return_user_data(ret_t ret) {
-    return (uint16_t) (ret>>32UL);
-}
-
-static ret_field_t* return_map(ret_t* ret)
-{
-    return (ret_field_t*)ret;
-}
 
 static ret_t return_create(uint8_t code) {
-    ret_t ret = code;
-    ret |= (ret_t) 1 << 24;
 
-    return_trace(ret);
-    return ret;
+    ret_f_t ret = { .code = code };
+
+    return ret.r;
 }
 
 static ret_t return_create_v(uint8_t code, uint16_t user_data) {
-    ret_t ret = code;
-    ret |= (ret_t) 1 << 24;
-    ret |= (ret_t) user_data << 32;
+    ret_f_t ret = { .code =  code };
+    ret.depth = 1;
+    ret.data = user_data;
 
     return_trace(ret);
 
-    return ret;
+    return ret.r;
 }
 
 static ret_t return_create_mv(uint8_t code, const char *msg, uint16_t user_data) {
+
 #ifdef RET_MULTITHREADED
     pthread_spin_lock(&gmsg_tab_lock);
 
@@ -336,40 +321,30 @@ static ret_t return_create_mv(uint8_t code, const char *msg, uint16_t user_data)
     gmsg_tab[gmsg_idx++] = msg;
 #endif
 
-    ret_t ret = (ret_t) code;
+    ret_f_t ret;
+    ret.r = 0;
+    ret.code = code;
+    ret.idx = gmsg_idx - 1;
+    ret.depth = 0;
+    ret.data = user_data;
 
     return_trace(ret);
 
-    ret |= (ret_t) (gmsg_idx - 1) << 8;
-
-    return_trace(ret);
-
-    ret |= (ret_t) 231 << 24;
-
-    return_trace(ret);
-
-    ret |= (ret_t) user_data << 32;
-
-    return_trace(ret);
-
-    return ret;
+    return ret.r;
 }
 
 static ret_t return_forward(ret_t r) {
-    ret_t ret = r;
+    ret_f_t ret;
+    ret.r = r;
 
     return_trace(ret);
 
-    uint8_t depth = return_depth(ret) + 1;
-
-    ret &= 0xFFFFFFFF00FFFFFFUL;
-    ret |= depth << 24UL;
+    ret.depth++;
 
 
     return_trace(ret);
 
-
-    return ret;
+    return ret.r;
 
 }
 
@@ -380,10 +355,12 @@ typedef struct ret_info {
     uint16_t user_data;
 } ret_info_t;
 
-static void return_unpack(ret_t ret, ret_info_t *info) {
-    info->code = return_code(ret);
+static void return_unpack(ret_t r, ret_info_t *info) {
+    ret_f_t ret;
+    ret.r = r;
+    info->code = ret.code;
 
-    uint16_t idx = return_msg_idx(ret);
+    uint16_t idx = ret.idx;
 #ifdef RET_MULTITHREADED
     pthread_spin_lock(&gmsg_tab_lock);
 
@@ -394,9 +371,9 @@ static void return_unpack(ret_t ret, ret_info_t *info) {
     info->msg = gmsg_tab[idx];
 #endif
 
-    info->depth = return_depth(ret);
+    info->depth = ret.depth;
 
-    info->user_data = return_user_data(ret);
+    info->user_data = ret.data;
 }
 
 static ret_t _test_ret3() {
@@ -414,6 +391,8 @@ static ret_t _test_ret1() {
 }
 
 static void test_ret() {
+    
+    ASSERT_EQ(sizeof(ret_f_t), sizeof(ret_t));
 
     ret_t ret = _test_ret1();
 
@@ -421,10 +400,10 @@ static void test_ret() {
     ret_info_t info;
     return_unpack(ret, &info);
 
-    ASSERT(info.code == ST_OUT_OF_RANGE);
-    ASSERT(info.depth == 3);
+    ASSERT_EQ(info.code, ST_OUT_OF_RANGE);
+    ASSERT_EQ(info.depth, 2);
     ASSERT(strcmp(info.msg, "Massive bounds") == 0);
-    ASSERT(info.user_data == 463);
+    ASSERT_EQ(info.user_data, 463);
 
 
 }
