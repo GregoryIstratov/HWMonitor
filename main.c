@@ -75,7 +75,6 @@ static void _log(FILE* out, ...)
 #define LOG_TRACE(...) (_log(__FILE__, __LINE__, __func__, LOG_TRACE, __VA_ARGS__))
 #define LOG_ASSERT(...) (_log(__FILE__, __LINE__, __func__, LOG_ASSERT, __VA_ARGS__))
 #define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
-
 #define ASSERT_EQ(a, b) ((a == b)?__ASSERT_VOID_CAST (0): LOG_ASSERT("%s != %s [%lu] != [%lu]", #a, #b, a, b))
 
 //#define LOG_SHOW_TIME
@@ -280,6 +279,13 @@ enum {
 // 64 bit
 // [16 bit reserved][16 bit value data][16 bit idx msg][8 bit depth][8 bit code]
 
+#define RETURN_CHECK(x) { ret_f_t r = return_map(x); \
+if(r.code!=ST_OK) LOG_WARN("Return result code(%d) is not ok. User_data=%d. Msg: (%s). Depth=%d", r.code, r.data, gmsg_tab[r.idx], r.depth); \
+return return_forward(x); }
+
+#define CHECK_RETURN(x) { ret_f_t r = return_map(x); \
+if(r.code!=ST_OK) LOG_ASSERT("[%s] Return result code(%d) is not ok. User_data=%d. Msg: (%s). Depth=%d", #x, r.code, r.data, gmsg_tab[r.idx], r.depth);  }
+
 #define RET_MULTITHREADED
 
 typedef uint64_t ret_t;
@@ -299,6 +305,8 @@ typedef struct ret_field
 
 } ret_f_t;
 
+static const ret_t RET_OK = 0;
+
 pthread_spinlock_t gmsg_tab_lock;
 static const char *gmsg_tab[UINT16_MAX]; // about 500 kb, //TODO make it dynamic
 static uint16_t gmsg_idx = 1;
@@ -314,7 +322,7 @@ static ret_t return_create(uint8_t code) {
     return ret.r;
 }
 
-static ret_t return_create_v(uint8_t code, uint16_t user_data) {
+static ret_t return_create2(uint8_t code, uint16_t user_data) {
     ret_f_t ret = { .code =  code };
     ret.depth = 1;
     ret.data = user_data;
@@ -322,6 +330,25 @@ static ret_t return_create_v(uint8_t code, uint16_t user_data) {
     return_trace(ret);
 
     return ret.r;
+}
+
+static ret_f_t return_map(ret_t r)
+{
+    ret_f_t ret;
+    ret.r = r;
+    return ret;
+}
+
+static uint8_t return_code(ret_t r)
+{
+    ret_f_t ret = return_map(r);
+    return ret.code;
+}
+
+static uint16_t return_data(ret_t r)
+{
+    ret_f_t ret = return_map(r);
+    return ret.data;
 }
 
 static ret_t return_create_mv(uint8_t code, const char *msg, uint16_t user_data) {
@@ -421,6 +448,9 @@ static void test_ret() {
     ASSERT_EQ(info.user_data, 463);
 
 
+    ret_f_t r2 = return_map(ST_OK);
+
+    ASSERT_EQ(r2.code, ST_OK);
 }
 
 //======================================================================================================================
@@ -1082,7 +1112,7 @@ static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
         a->size = size;
     }
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
 static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
@@ -1095,7 +1125,7 @@ static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*a), (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
 static ret_t da_init(dynamic_allocator_t **a) {
@@ -1105,7 +1135,7 @@ static ret_t da_init(dynamic_allocator_t **a) {
 
 static ret_t da_release(dynamic_allocator_t **a) {
     if (NULLPP(a))
-        return ST_EMPTY;
+        return return_create(ST_EMPTY);
 
     if (*a) {
         LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
@@ -1115,7 +1145,7 @@ static ret_t da_release(dynamic_allocator_t **a) {
         safe_free((void **) a);
     }
 
-    return ST_OK;
+    return return_create(ST_OK);;
 }
 
 static ret_t da_fit(dynamic_allocator_t *a) {
@@ -1130,31 +1160,32 @@ static ret_t da_fit(dynamic_allocator_t *a) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return 0;
+    return return_create(ST_OK);;
 }
 
-static ret_t da_crop_tail(dynamic_allocator_t *a, size_t pos) {
+static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
-              a, a->ptr, a->size, a->used, a->mul, pos);
+              a, a->ptr, a->size, a->used, a->mul, n);
 
-    if (pos > a->size) {
+    if (n > a->size) {
         LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
-                 a, a->ptr, a->size, a->used, a->mul, pos);
+                 a, a->ptr, a->size, a->used, a->mul, n);
 
-        return ST_OUT_OF_RANGE;
+        return return_create(ST_OUT_OF_RANGE);
     }
 
-    a->size = a->used - pos;
-    char *newbuff = zalloc(a->size);
-    memcpy(newbuff, &a->ptr[pos], a->size);
+    size_t nsize = a->used - n;
+    char *newbuff = zalloc(nsize);
+    memcpy(newbuff, a->ptr+n, nsize);
     free(a->ptr);
     a->ptr = newbuff;
+    a->size = nsize;
     a->used = a->size;
 
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);;
 }
 
 static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
@@ -1166,7 +1197,7 @@ static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
         LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
                  a, a->ptr, a->size, a->used, a->mul, n);
 
-        return ST_OUT_OF_RANGE;
+        return return_create(ST_OUT_OF_RANGE);
     }
 
     da_realloc(a, a->size - n);
@@ -1174,14 +1205,14 @@ static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
 static ret_t da_check_size(dynamic_allocator_t *a, size_t new_size) {
     if (a->size < a->used + new_size)
         da_realloc(a, a->used + new_size);
 
-    return 0;
+    return return_create(ST_OK);
 }
 
 static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
@@ -1200,24 +1231,24 @@ static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
-static ret_t da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
+static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; input begin=%lu end=%lu",
               a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-    size_t ssize = end - begin + 1;
+    size_t ssize = end - begin;
     if (ssize > a->used) {
 
         LOG_WARN("a=[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu and end=%lu out of range",
                  a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-        return ST_OUT_OF_RANGE;
+        return return_create(ST_OUT_OF_RANGE);
     }
 
     da_init_n(b, ssize);
-    da_append(*b, a->ptr + begin - 1, ssize);
+    da_append(*b, a->ptr + begin, ssize);
 
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
@@ -1225,12 +1256,8 @@ static ret_t da_sub2(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_a
     LOG_TRACE("e b[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 
-}
-
-static ret_t da_sub(dynamic_allocator_t *a, size_t pos, dynamic_allocator_t **b) {
-    return da_sub2(a, pos, a->used, b);
 }
 
 
@@ -1248,7 +1275,7 @@ static ret_t da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
 static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
@@ -1271,7 +1298,7 @@ static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     DA_TRACE(a);
     ASSERT(*b == NULL);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
 static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
@@ -1293,24 +1320,24 @@ static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
     DA_TRACE(a);
     DA_TRACE(b);
 
-    return ST_OK;
+    return return_create(ST_OK);
 }
 
-static ret_t da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
-    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu n=%lu",
-              a, a->ptr, a->size, a->used, a->mul, n);
+static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
+    LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu end=%lu",
+              a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-
-    if (pos + n > a->used) {
-        LOG_WARN("pos(%lu) + n(%lu) >= total used(%lu) bytes", pos, n, a->used);
-        return ST_SIZE_EXCEED;
+    size_t dsize = end - begin;
+    if (dsize > a->used) {
+        LOG_WARN("begin(%lu) + end(%lu) >= total used(%lu) bytes", begin, end, a->used);
+        return return_create(ST_SIZE_EXCEED);
     }
 
     dynamic_allocator_t *b = NULL;
 
-    da_sub(a, pos + n, &b);
+    da_sub(a, end, a->used, &b);
 
-    da_realloc(a, pos - 1);
+    da_realloc(a, begin);
 
     da_merge(a, &b);
 
@@ -1318,65 +1345,103 @@ static ret_t da_remove_seq(dynamic_allocator_t *a, size_t pos, size_t n) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return ST_OK;
+    return return_create(ST_OK);
 
 }
 
 static ret_t da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
-    return memcmp(a->ptr, b->ptr, MIN(a->used, b->used));
+    return return_create2(ST_OK, memcmp(a->ptr, b->ptr, MIN(a->used, b->used)));
 }
 
-static void da_test() {
+
+static ret_t da_comparez(dynamic_allocator_t *a, const char *b) {
+    size_t ssize = strlen(b);
+    return return_create2(ST_OK, memcmp(a->ptr, b, MIN(a->used, ssize)));
+}
+
+static void test_da() {
+    ret_t ret;
     dynamic_allocator_t *da = NULL;
+    dynamic_allocator_t *da2 = NULL;
     dynamic_allocator_t *db = NULL;
     dynamic_allocator_t *dc = NULL;
     dynamic_allocator_t *dd = NULL;
     dynamic_allocator_t *de = NULL;
     dynamic_allocator_t *df = NULL;
 
-    da_init(&da);
+    CHECK_RETURN(da_init(&da));
 
     // 0    H
-    // 2    e
+    // 1    e
+    // 2    l
     // 3    l
-    // 4    l
-    // 5    o
-    // 6    ,
-    // 7
-    // 8    S
-    // 9    w
+    // 4    o
+    // 5    ,
+    // 6
+    // 7    S
+    // 8    w
+    // 9    e
     // 10   e
-    // 11   e
-    // 12   t
-    // 13
-    // 14   M
-    // 15   a
-    // 16   r
-    // 17   i
-    // 18   a
-    // 19   !
-    char const *str1 = "Hello, Sweet Maria!";
-    da_append(da, str1, strlen(str1));
+    // 11   t
+    // 12
+    // 13   M
+    // 14   a
+    // 15   r
+    // 16   i
+    // 17   a
+    // 18   !
+    // 19   EOF
 
-    da_sub2(da, 14, 19, &db);
-    da_sub(da, 14, &dc);
+#define STR_TO_PZ(str) str, strlen(str)
 
-    ASSERT(da_compare(db, db) == 0);
+//    char const *str1 = "Hello, Sweet Maria!";
+    CHECK_RETURN(da_append(da, STR_TO_PZ("Hello, ")));
+    CHECK_RETURN(da_append(da, STR_TO_PZ("Sweet Maria!")));
 
-    da_init(&de);
-    da_append(de, " My ", 4);
-    da_sub2(da, 8, 12, &df);
-    da_append(df, "!", 1);
+#undef STR_TO_PZ
 
-    da_remove_seq(da, 8, 6);
+    CHECK_RETURN(da_dub(da, &da2));
+    CHECK_RETURN(da_remove(da2, 0, 7));
 
-    da_merge(de, &df);
+    ret = da_comparez(da2, "Sweet Maria!");
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
 
-    da_concant(da, de);
+    CHECK_RETURN(da_sub(da, 13, 19, &db));
+
+    ret = da_comparez(db, "Maria!");
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+
+    ret = da_compare(db, db);
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+
+    CHECK_RETURN(da_init(&de));
+    CHECK_RETURN(da_append(de, " My ", 4));
+
+    ret = da_comparez(de, " My ");
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+
+    CHECK_RETURN(da_sub(da, 7, 12, &df));
+
+    ret = da_comparez(df, "Sweet");
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+
+
+    CHECK_RETURN(da_append(df, "!", 1));
+
+    CHECK_RETURN(da_remove(da, 7, 13));
+
+    ret = da_comparez(da, "Hello, Maria!");
+    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+
+    CHECK_RETURN(da_merge(de, &df));
+
+    CHECK_RETURN(da_concant(da, de));
 
 
     da_release(&da);
     ASSERT(NULL == da);
+    da_release(&da2);
+    ASSERT(NULL == da2);
     da_release(&db);
     ASSERT(NULL == db);
     da_release(&dc);
@@ -1390,7 +1455,592 @@ static void da_test() {
 }
 
 //=======================================================================
-// GENERIC LIST
+// STRING
+//=======================================================================
+
+typedef struct {
+    union {
+        uint8_t _[sizeof(dynamic_allocator_t)];
+        dynamic_allocator_t da;
+    };
+
+} string;
+
+
+#define _da(x) ((dynamic_allocator_t*)x)
+#define _dap(x) ((dynamic_allocator_t**)x)
+
+typedef struct skey_value {
+    string *key;
+    string *value;
+} skey_value_t;
+
+static string *string_null = NULL;
+
+static ret_t string_init(string **sp) {
+    return da_init(_dap(sp));
+}
+
+static ret_t string_release(string **s) {
+    return da_release(_dap(s));
+}
+
+static const char *string_cdata(string *s) {
+    return _da(s)->ptr;
+}
+
+static size_t string_size(string *s) {
+    return _da(s)->used;
+}
+
+static char string_char(string *s, size_t idx) {
+    if (idx > string_size(s)) {
+        LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
+        return (char) -1;
+    }
+
+    return _da(s)->ptr[idx];
+}
+
+static ret_t string_create_nt(string *s, char **buff) {
+    size_t ssize = string_size(s);
+    *buff = zalloc(ssize + 1);
+    memcpy(*buff, string_cdata(s), ssize);
+
+    return ST_OK;
+}
+
+static ret_t string_dub(string *s, string **ns) {
+    return da_dub(_da(s), _dap(ns));
+}
+
+static ret_t string_append(string *s, const char *str) {
+    size_t len = strlen(str);
+    return da_append(_da(s), str, len);
+
+}
+
+static void string_init_globals() {
+    string_init(&string_null);
+    string_append(string_null, "(null)");
+}
+
+
+static ret_t string_appendn(string *s, const char *str, size_t len) {
+    return da_append(_da(s), str, len);
+
+}
+
+static ret_t string_create(string **s, const char *str) {
+    string_init(s);
+
+    return string_append(*s, str);
+}
+
+static ret_t string_add(string *a, string *b) {
+    return da_concant(_da(a), _da(b));
+}
+
+static ret_t string_pop_head(string *s, size_t n) {
+    return da_pop_head(_da(s), n);
+}
+
+static ret_t string_crop_tail(string *s, size_t n) {
+    return da_crop_tail(_da(s), n);
+}
+
+static size_t string_find_last_char(string *s, char ch) {
+    size_t ssize = string_size(s);
+    for (size_t i = ssize; i != 0; --i) {
+        char cur = string_char(s, i);
+        if (cur == ch)
+            return i;
+    }
+
+    return size_npos;
+
+}
+
+static ret_t string_remove_seq(string *s, size_t begin, size_t end) {
+    return da_remove(_da(s), begin, end);
+}
+
+static ret_t string_remove_dubseq(string *s, char delm, uint8_t skip) {
+    size_t j = 0;
+    while (j < string_size(s)) {
+        const char *cur = string_cdata(s);
+
+        if(cur[j] == delm)
+        {
+            size_t begin = j;
+            size_t end = begin;
+
+            while (cur[(++end)] == delm);
+
+            //--end;// last compared position
+            size_t n = end - begin;
+
+            if(n > 1)
+            {
+
+                size_t skip_ = 0;
+                if(skip >= n)
+                {
+                    LOG_WARN("skip value is too high. skip=%d", skip);
+                } else
+                {
+                    skip_ = (size_t)skip;
+                }
+
+                CHECK_RETURN(string_remove_seq(s, begin, end-skip_));
+                j = 0; // skip due to internal buffer changed
+                continue;
+            }
+        }
+
+        ++j;
+    }
+
+    return ST_OK;
+}
+
+static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
+static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
+
+static bool check_strip_dict(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
+        if (ch == strip_dict[i])
+            return true;
+
+    return false;
+}
+
+static ret_t string_rstrip(string *s) {
+
+    if(string_size(s) < 1)
+    {
+        LOG_WARN("String size(%lu) is too small", string_size(s));
+        return return_create(ST_OUT_OF_RANGE);
+    }
+
+    size_t n = 0;
+    for(size_t j = string_size(s)-1; j != 0; --j)
+    {
+        char sch = string_char(s, j);
+        if (check_strip_dict(sch))
+            ++n;
+        else
+            break;
+    }
+
+    return string_pop_head(s, n);
+}
+
+static ret_t string_lstrip(string *s) {
+
+    size_t n = 0;
+    for(size_t j = 0; j < string_size(s); ++j)
+    {
+        char sch = string_char(s, j);
+        if (check_strip_dict(sch))
+            ++n;
+        else
+            break;
+    }
+
+    return string_crop_tail(s, n);
+}
+
+static ret_t string_strip(string *s) {
+
+    if (string_size(s) < 3)
+        return ST_SIZE_EXCEED;
+
+    string_rstrip(s);
+    string_lstrip(s);
+
+    return ST_OK;
+}
+
+static bool check_strip_dict_ws(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
+        if (ch == strip_dict_ws[i])
+            return true;
+
+    return false;
+}
+
+static ret_t string_rstrip_ws(string *s) {
+    while (string_size(s) > 2) {
+
+        size_t idx = string_size(s) - 1;
+        char sch = string_char(s, idx);
+
+        if (check_strip_dict_ws(sch)) {
+            string_pop_head(s, 1);
+        } else {
+            return ST_OK;
+        }
+
+    }
+
+    return ST_OK;
+}
+
+static ret_t string_starts_with(string *s, const char *str) {
+    size_t str_len = strlen(str);
+    if (str_len > string_size(s))
+        return return_create(ST_SIZE_EXCEED);
+
+    if (memcmp(string_cdata(s), str, str_len) == 0)
+        return return_create(ST_OK);
+
+    return return_create(ST_NOT_FOUND);
+}
+
+static ret_t string_compare(string *a, string *b) {
+    return da_compare(_da(a), _da(b));
+}
+
+static ret_t string_comparez(string *a, const char *str) {
+    return string_starts_with(a, str);
+}
+
+static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
+    size_t ssize = string_size(s);
+    if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
+        LOG_ERROR("Indexes are out of bound");
+        return ST_OUT_OF_RANGE;
+    }
+
+    *sb = _da(s)->ptr + beg;
+    *se = _da(s)->ptr + end;
+
+    return ST_OK;
+}
+
+static void string_map_string(string *s, char **sb, char **se) {
+    string_map_region(s, 0, string_size(s), sb, se);
+}
+
+static ret_t string_to_u64(string *s, uint64_t *ul) {
+
+    uint64_t res = 0;
+    size_t ssize = string_size(s);
+    for (size_t i = 0; i < ssize; ++i)
+        res = res * 10 + string_char(s, i) - '0';
+
+    *ul = res;
+
+    return ST_OK;
+
+}
+
+#define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
+#define string_printd(a) LOG_DEBUG("%.*s", string_size(a), string_cdata(a));
+#define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
+
+static void test_string() {
+    static const char *str1 = "Hello, World!";
+    static const char *str2 = "What's up, Dude?";
+    ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
+
+    string *a = NULL;
+    string *b = NULL;
+    string* c = NULL;
+    string* d = NULL;
+
+
+    CHECK_RETURN(string_init(&a));
+    CHECK_RETURN(string_release(&a));
+
+    CHECK_RETURN(string_create(&a, str1));
+    CHECK_RETURN(string_comparez(a, str1));
+
+    CHECK_RETURN(string_dub(a, &b));
+    ASSERT(string_compare(a, b) == 0);
+
+    CHECK_RETURN(string_append(b, str2));
+
+    string_print(b);
+
+    CHECK_RETURN(string_add(b, a));
+
+    string_printt(a);
+    string_print(b);
+
+    CHECK_RETURN(string_create(&c, "      abc\n\n\n\n\n\n\n       "));
+
+    CHECK_RETURN(string_strip(c));
+
+    string_print(c);
+
+    CHECK_RETURN(string_comparez(c, "abc"));
+
+
+    CHECK_RETURN(string_create(&d, "aabccc____3_2_1   :::"));
+    CHECK_RETURN(string_remove_dubseq(d, 'a', 0));
+    CHECK_RETURN(string_remove_dubseq(d, 'b', 0));
+    CHECK_RETURN(string_remove_dubseq(d, 'c', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '_', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '3', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '2', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '1', 0));
+    CHECK_RETURN(string_remove_dubseq(d, ' ', 0));
+    CHECK_RETURN(string_remove_dubseq(d, ':', 0));
+
+    ASSERT(string_comparez(d, "b3_2_1") == RET_OK);
+    string_print(d);
+
+
+    string_release(&a);
+    string_release(&b);
+    string_release(&c);
+    string_release(&d);
+
+}
+
+//=======================================================================
+// GENERIC FIFO
+//=======================================================================
+
+typedef struct fifo_node {
+    void *data;
+    struct fifo_node *next;
+
+} fifo_node_t;
+
+typedef struct fifo {
+    fifo_node_t *head;
+    fifo_node_t* top;
+    size_t size;
+    size_t elem_size;
+
+} fifo_t;
+
+
+static void fifo_init(fifo_t **l, size_t elem_size) {
+    *l = zalloc(sizeof(fifo_t));
+    (*l)->elem_size = elem_size;
+}
+
+static void fifo_node_init(fifo_node_t **node) {
+    *node = zalloc(sizeof(fifo_node_t));
+}
+
+static void *fifo_dub_data(fifo_t *l, const void *data) {
+    void *v = zalloc(l->elem_size);
+    memcpy(v, data, l->elem_size);
+    return v;
+}
+
+static void fifo_push(fifo_t *l, const void *s) {
+
+    if (!l->head) {
+        fifo_node_init(&l->head);
+
+        fifo_node_t *node = l->head;
+
+        node->data = fifo_dub_data(l, s);
+
+        l->top = l->head;
+    }
+    else
+    {
+        fifo_node_t *node = NULL;
+        fifo_node_init(&node);
+        node->data = fifo_dub_data(l, s);
+        l->top->next = node;
+
+
+        l->top = node;
+
+    }
+
+    ++l->size;
+}
+
+static void* fifo_pop(fifo_t *l) {
+    if (!l->head)
+        return NULL;
+
+    fifo_node_t *tmp = l->head;
+    l->head = tmp->next;
+    l->size--;
+
+    void* p = tmp->data;
+    safe_free((void**)&tmp);
+
+    return p;
+}
+
+static ret_t fifo_release(fifo_t **l) {
+    if (NULLPP(l) && *l == NULL)
+        return return_create(ST_EMPTY);
+
+
+
+    while(fifo_pop(*l));
+
+    safe_free((void**)l);
+
+
+    return RET_OK;
+
+}
+
+void test_fifo()
+{
+    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+
+    fifo_t* f = NULL;
+    fifo_init(&f, sizeof(uint64_t));
+
+    fifo_push(f, &ii[0]);
+    fifo_push(f, &ii[1]);
+    fifo_push(f, &ii[2]);
+    fifo_push(f, &ii[3]);
+    fifo_push(f, &ii[4]);
+    fifo_push(f, &ii[5]);
+    fifo_push(f, &ii[6]);
+    fifo_push(f, &ii[7]);
+
+
+    uint64_t* p = NULL;
+    uint64_t i = 0;
+    while((p = (uint64_t*)fifo_pop(f)))
+    {
+        ASSERT(ii[i++] == *p);
+        LOG_TRACE("fifo %lu", *p);
+        free(p);
+    }
+
+
+    fifo_release(&f);
+
+}
+
+//=======================================================================
+// GENERIC LIFO
+//=======================================================================
+
+typedef struct lifo_node {
+    void *data;
+    struct lifo_node *prev;
+
+} lifo_node_t;
+
+typedef struct lifo {
+    lifo_node_t *head;
+    size_t size;
+    size_t elem_size;
+
+} lifo_t;
+
+
+static void lifo_init(lifo_t **l, size_t elem_size) {
+    *l = zalloc(sizeof(lifo_t));
+    (*l)->elem_size = elem_size;
+}
+
+static void lifo_node_init(lifo_node_t **node) {
+    *node = zalloc(sizeof(lifo_node_t));
+}
+
+static void *lifo_dub_data(lifo_t *l, const void *data) {
+    void *v = zalloc(l->elem_size);
+    memcpy(v, data, l->elem_size);
+    return v;
+}
+
+static void lifo_push(lifo_t *l, const void *s) {
+
+    if (!l->head) {
+        lifo_node_init(&l->head);
+
+        lifo_node_t *node = l->head;
+
+        node->data = lifo_dub_data(l, s);
+    }
+    else
+    {
+        lifo_node_t *node = NULL;
+        lifo_node_init(&node);
+        node->data = lifo_dub_data(l, s);
+        node->prev = l->head;
+
+
+        l->head = node;
+    }
+
+    ++l->size;
+}
+
+static void* lifo_pop(lifo_t *l) {
+    if (!l->head)
+        return NULL;
+
+    lifo_node_t *tmp = l->head;
+    l->head = tmp->prev;
+    l->size--;
+
+    void* p = tmp->data;
+    safe_free((void**)&tmp);
+
+    return p;
+}
+
+static ret_t lifo_release(lifo_t **l) {
+    if (NULLPP(l) && *l == NULL)
+        return return_create(ST_EMPTY);
+
+
+
+    while(lifo_pop(*l));
+
+    safe_free((void**)l);
+
+
+    return RET_OK;
+
+}
+
+void test_lifo()
+{
+    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+
+    lifo_t* f = NULL;
+    lifo_init(&f, sizeof(uint64_t));
+
+    lifo_push(f, &ii[0]);
+    lifo_push(f, &ii[1]);
+    lifo_push(f, &ii[2]);
+    lifo_push(f, &ii[3]);
+    lifo_push(f, &ii[4]);
+    lifo_push(f, &ii[5]);
+    lifo_push(f, &ii[6]);
+    lifo_push(f, &ii[7]);
+
+
+    uint64_t* p = NULL;
+    uint64_t i = 7;
+    while((p = (uint64_t*)lifo_pop(f)))
+    {
+        ASSERT(ii[i--] == *p);
+        LOG_TRACE("lifo %lu", *p);
+        free(p);
+    }
+
+
+    lifo_release(&f);
+
+}
+
+
+//=======================================================================
+// GENERIC DOUBLE LINKED LIST
 //=======================================================================
 
 typedef struct list_node {
@@ -1414,63 +2064,41 @@ static void list_init(list_t **l, size_t elem_size) {
     (*l)->elem_size = elem_size;
 }
 
-static void node_init(list_node_t **node) {
+static void list_node_init(list_node_t **node) {
     *node = zalloc(sizeof(list_node_t));
 }
 
-static void *list_dub_data(list_t *l, void *data) {
+static void *list_dub_data(list_t *l, const void *data) {
     void *v = zalloc(l->elem_size);
     memcpy(v, data, l->elem_size);
     return v;
 }
 
-static void node_append(list_t *l, bool tail, list_node_t *node, list_node_t *prev, void *data) {
-    if (!node)
-        node_init(&node);
+static void list_push(list_t *l, const void *s) {
 
-    if (node->data == NULL) {
-        node->data = list_dub_data(l, data);
-        node->prev = prev;
+    if (!l->head) {
+        list_node_init(&l->head);
 
-        if (prev) {
-            if (tail)
-                prev->next = node;
-            else
-                prev->prev = node;
-        }
+        list_node_t *node = l->head;
 
-        l->size++;
-        if (tail)
-            l->tail = node;
-        else
-            l->head = node;
-        return;
+        node->data = list_dub_data(l, s);
+
+        l->tail = l->head;
     }
+    else
+    {
+        list_node_t *node = NULL;
+        list_node_init(&node);
 
-    node_append(l, tail, node->next, node, data);
+        list_node_t *tail = l->head;
+        node->data = list_dub_data(l, s);
+        node->prev = l->head;
+        node->next = l->head->prev;
+        l->head = node;
 
-}
 
-static void list_append_tail(list_t *l, void *s) {
-    if (!l->head)
-        node_init(&l->head);
-
-    if (!l->tail)
-        node_init(&l->tail);
-
-    node_append(l, true, l->head, NULL, s);
-
-}
-
-static void list_append_head(list_t *l, void *s) {
-    if (!l->head)
-        node_init(&l->head);
-
-    if (!l->tail)
-        node_init(&l->tail);
-
-    node_append(l, false, l->head, NULL, s);
-
+        l->tail = tail;
+    }
 }
 
 static void *list_pop_head(list_t *l) {
@@ -1580,6 +2208,11 @@ static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
 
     list_node_t *cur = forward ? l->tail : l->head;
 
+//    while (cur != (forward? l->head : l->tail)) {
+//        cb(cur);
+//        cur = forward ? cur->next : cur->next;
+//    }
+
     while (cur) {
         cb(cur);
         cur = forward ? cur->next : cur->prev;
@@ -1588,260 +2221,82 @@ static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
     return ST_OK;
 }
 
-//=======================================================================
-// GENERIC VECTOR
-//=======================================================================
-typedef struct vector {
-    dynamic_allocator_t *alloc;
-    size_t size;
-    size_t elem_size;
-} vector_t;
-
-static ret_t vector_init(vector_t **vec, size_t elem_size) {
-    *vec = zalloc(sizeof(vector_t));
-    da_init_n(&(*vec)->alloc, elem_size * 10);
-    (*vec)->elem_size = elem_size;
-
-    return ST_OK;
+void test_list_traverse(list_node_t* node)
+{
+    uint64_t i = *((uint64_t*)node->data);
+    LOG_TRACE("list elem %lu", i);
 }
 
-static ret_t vector_release(vector_t *vec) {
-    da_release(&vec->alloc);
-    free(vec);
+void test_list()
+{
+    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    list_t* l = NULL;
+    list_init(&l, sizeof(uint64_t));
 
-    return ST_OK;
-}
+    ASSERT(l != NULL);
 
-static size_t vector_size(vector_t *vec) { return vec->size; }
+    list_push(l, &ii[0]);
+    list_push(l, &ii[1]);
+    list_push(l, &ii[2]);
+    list_push(l, &ii[3]);
+    list_push(l, &ii[4]);
+    list_push(l, &ii[5]);
+    list_push(l, &ii[6]);
+    list_push(l, &ii[7]);
 
-static ret_t vector_add(vector_t *vec, const void *elem) {
-    da_append(vec->alloc, (const char *) elem, vec->elem_size);
-    vec->size++;
+    ASSERT(l->size == 8);
 
-    return ST_OK;
-}
+    list_traverse(l, false, &test_list_traverse);
+    list_traverse(l, true, &test_list_traverse);
 
+    list_node_t* head = l->head;
+    size_t i = 7;
+    while(head)
+    {
+        uint64_t* pi = (uint64_t*)head->data;
 
-static ret_t vector_get(vector_t *vec, size_t idx, void **elem) {
-    if (idx >= vec->size)
-        return ST_OUT_OF_RANGE;
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
+        ASSERT(ii[i] == *pi);
 
-    *elem = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
-
-    return ST_OK;
-}
-
-static ret_t vector_set(vector_t *vec, size_t idx, void *elem) {
-    if (idx >= vec->size)
-        return ST_OUT_OF_RANGE;
-
-    void *el = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
-
-    memcpy(el, elem, vec->elem_size);
-
-    return ST_OK;
-
-}
-
-typedef void(*vector_foreach_cb)(size_t, size_t, void *, void *);
-
-static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
-    size_t n = vec->size;
-    for (size_t i = 0; i < n; ++i) {
-        void *v = (void *) &(vec->alloc->ptr[vec->elem_size * i]);
-        cb(i, vec->elem_size, ctx, v);
-    }
-}
-
-
-//=======================================================================
-// STRING
-//=======================================================================
-
-typedef struct {
-    uint8_t _[sizeof(dynamic_allocator_t)];
-
-} string;
-
-
-#define _da(x) ((dynamic_allocator_t*)x)
-#define _dap(x) ((dynamic_allocator_t**)x)
-
-typedef struct skey_value {
-    string *key;
-    string *value;
-} skey_value_t;
-
-static string *string_null = NULL;
-
-static ret_t string_init(string **sp) {
-    return da_init(_dap(sp));
-}
-
-static ret_t string_release(string **s) {
-    return da_release(_dap(s));
-}
-
-static const char *string_cdata(string *s) {
-    return _da(s)->ptr;
-}
-
-static size_t string_size(string *s) {
-    return _da(s)->used;
-}
-
-static char string_char(string *s, size_t idx) {
-    if (idx > string_size(s)) {
-        LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
-        return (char) -1;
+        --i;
+        head = head->prev;
     }
 
-    return _da(s)->ptr[idx];
-}
+    list_release(&l);
+    ASSERT(l == NULL);
 
-static ret_t string_create_nt(string *s, char **buff) {
-    size_t ssize = string_size(s);
-    *buff = zalloc(ssize + 1);
-    memcpy(*buff, string_cdata(s), ssize);
+    list_init(&l, sizeof(uint64_t));
 
-    return ST_OK;
-}
+    ASSERT(l != NULL);
 
-static ret_t string_dub(string *s, string **ns) {
-    return da_dub(_da(s), _dap(ns));
-}
+    list_push(l, &ii[0]);
+    list_push(l, &ii[1]);
+    list_push(l, &ii[2]);
+    list_push(l, &ii[3]);
+    list_push(l, &ii[4]);
+    list_push(l, &ii[5]);
+    list_push(l, &ii[6]);
+    list_push(l, &ii[7]);
 
-static ret_t string_append(string *s, const char *str) {
-    size_t len = strlen(str);
-    return da_append(_da(s), str, len);
+    ASSERT(l->size == 8);
 
-}
+    head = l->head;
+    i = 0;
+    while(head)
+    {
+        uint64_t* pi = (uint64_t*)head->data;
 
-static void string_init_globals() {
-    string_init(&string_null);
-    string_append(string_null, "(null)");
-}
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
+        ASSERT(ii[i] == *pi);
 
-
-static ret_t string_appendn(string *s, const char *str, size_t len) {
-    return da_append(_da(s), str, len);
-
-}
-
-static ret_t string_create(string **s, const char *str) {
-    string_init(s);
-
-    return string_append(*s, str);
-}
-
-static ret_t string_add(string *a, string *b) {
-    return da_concant(_da(a), _da(b));
-}
-
-static ret_t string_pop_head(string *s, size_t n) {
-    return da_pop_head(_da(s), n);
-}
-
-static ret_t string_crop_tail(string *s, size_t n) {
-    return da_crop_tail(_da(s), n);
-}
-
-static size_t string_find_last_char(string *s, char ch) {
-    size_t ssize = string_size(s);
-    for (size_t i = ssize; i != 0; --i) {
-        char cur = string_char(s, i);
-        if (cur == ch)
-            return i;
+        ++i;
+        head = head->next;
     }
 
-    return size_npos;
-
+    list_release(&l);
+    ASSERT(l == NULL);
 }
 
-static ret_t string_starts_with(string *s, const char *str) {
-    size_t str_len = strlen(str);
-    if (str_len > string_size(s))
-        return ST_SIZE_EXCEED;
-
-    if (memcmp(string_cdata(s), str, str_len) == 0)
-        return ST_OK;
-
-    return ST_NOT_FOUND;
-}
-
-static ret_t string_compare(string *a, string *b) {
-    return da_compare(_da(a), _da(b));
-}
-
-static ret_t string_comparez(string *a, const char *str) {
-    return string_starts_with(a, str);
-}
-
-static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
-    size_t ssize = string_size(s);
-    if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
-        LOG_ERROR("Indexes are out of bound");
-        return ST_OUT_OF_RANGE;
-    }
-
-    *sb = _da(s)->ptr + beg;
-    *se = _da(s)->ptr + end;
-
-    return ST_OK;
-}
-
-static void string_map_string(string *s, char **sb, char **se) {
-    string_map_region(s, 0, string_size(s), sb, se);
-}
-
-static ret_t string_to_u64(string *s, uint64_t *ul) {
-
-    uint64_t res = 0;
-    size_t ssize = string_size(s);
-    for (size_t i = 0; i < ssize; ++i)
-        res = res * 10 + string_char(s, i) - '0';
-
-    *ul = res;
-
-    return ST_OK;
-
-}
-
-#define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
-#define string_printd(a) LOG_DEBUG("%.*s", string_size(a), string_cdata(a));
-#define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
-
-static void string_test() {
-    static const char *str1 = "Hello, World!";
-    static const char *str2 = "What's up, Dude?";
-    ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
-
-    string *a = NULL;
-    string *b = NULL;
-//    string* c = NULL;
-//    string* d = NULL;
-
-
-    ASSERT(string_init(&a) == ST_OK);
-    ASSERT(string_release(&a) == ST_OK);
-
-    ASSERT(string_create(&a, str1));
-    ASSERT(string_comparez(a, str1));
-
-    ASSERT(string_dub(a, &b) == ST_OK);
-    ASSERT(string_compare(a, b) == 0);
-
-    ASSERT(string_append(b, str2) == ST_OK);
-
-    string_print(b);
-
-    ASSERT(string_add(b, a) == ST_OK);
-
-    string_printt(a);
-    string_print(b);
-
-
-}
 
 //=======================================================================
 // SLIST
@@ -1960,7 +2415,10 @@ static ret_t slist_release(slist **sl, bool srelease) {
 }
 
 static void slist_merge(slist *a, slist *b) {
-    if (a->size == 0 && b->size == 0) EXIT_ERROR("lists must contain at least one element");
+    if (a->size == 0 && b->size == 0) {
+        LOG_WARN("lists must contain at least one element");
+        return;
+    }
 
 
     a->tail->next = b->head;
@@ -2032,119 +2490,13 @@ static void slist_rfprint(slist *sl, FILE *output) {
     }
 }
 
-static ret_t string_remove_seq(string *s, size_t pos, size_t n) {
-    return da_remove_seq(_da(s), pos, n);
-}
-
-static ret_t string_remove_dubseq(string *s, char delm) {
-    size_t j = 0;
-    while (j < string_size(s)) {
-        const char *cur = string_cdata(s);
-        size_t i = 0;
-        size_t n = 0;
-
-        while (cur[j + (i++)] == delm) ++n;
-
-
-        if (n > 1) {
-            int res = ST_OK;
-            if ((res = string_remove_seq(s, j + i, n) != ST_OK))
-                return res;
-
-            j = 0; // skip due to internal buffer changed
-        }
-
-        ++j;
-
-        if (j >= string_size(s))
-            break;
-
-    }
-
-    return ST_OK;
-}
-
-static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
-static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
-
-static bool check_strip_dict(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
-        if (ch == strip_dict[i])
-            return true;
-
-    return false;
-}
-
-static ret_t string_rstrip(string *s) {
-    while (string_size(s) > 0) {
-        size_t idx = string_size(s) - 1;
-        char sch = string_char(s, idx);
-
-        if (check_strip_dict(sch))
-            string_pop_head(s, 1);
-        else
-            return ST_OK;
-
-    }
-
-    return ST_OK;
-}
-
-static ret_t string_lstrip(string *s) {
-    for (size_t j = 0; j < string_size(s); ++j) {
-
-        char sch = string_char(s, j);
-        if (check_strip_dict(sch))
-            string_crop_tail(s, 1);
-        else
-            return ST_OK;
-    }
-    return ST_OK;
-}
-
-static ret_t string_strip(string *s) {
-
-    if (string_size(s) < 3)
-        return ST_SIZE_EXCEED;
-
-    string_rstrip(s);
-    string_lstrip(s);
-
-    return ST_OK;
-}
-
-static bool check_strip_dict_ws(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
-        if (ch == strip_dict_ws[i])
-            return true;
-
-    return false;
-}
-
-static ret_t string_rstrip_ws(string *s) {
-    while (string_size(s) > 2) {
-
-        size_t idx = string_size(s) - 1;
-        char sch = string_char(s, idx);
-
-        if (check_strip_dict_ws(sch)) {
-            string_pop_head(s, 1);
-        } else {
-            return ST_OK;
-        }
-
-    }
-
-    return ST_OK;
-}
-
 static ret_t string_split(string *s, char delm, slist **sl) {
     if (string_size(s) == 0)
         return ST_EMPTY;
 
 
     string_rstrip_ws(s);
-    string_remove_dubseq(s, delm);
+    string_remove_dubseq(s, delm, 1);
 
     slist_init(sl);
     char *cb = NULL;
@@ -2172,6 +2524,72 @@ static ret_t string_split(string *s, char delm, slist **sl) {
     }
 
     return ST_OK;
+}
+
+
+//=======================================================================
+// GENERIC VECTOR
+//=======================================================================
+typedef struct vector {
+    dynamic_allocator_t *alloc;
+    size_t size;
+    size_t elem_size;
+} vector_t;
+
+static ret_t vector_init(vector_t **vec, size_t elem_size) {
+    *vec = zalloc(sizeof(vector_t));
+    da_init_n(&(*vec)->alloc, elem_size * 10);
+    (*vec)->elem_size = elem_size;
+
+    return ST_OK;
+}
+
+static ret_t vector_release(vector_t *vec) {
+    da_release(&vec->alloc);
+    free(vec);
+
+    return ST_OK;
+}
+
+static size_t vector_size(vector_t *vec) { return vec->size; }
+
+static ret_t vector_add(vector_t *vec, const void *elem) {
+    da_append(vec->alloc, (const char *) elem, vec->elem_size);
+    vec->size++;
+
+    return ST_OK;
+}
+
+
+static ret_t vector_get(vector_t *vec, size_t idx, void **elem) {
+    if (idx >= vec->size)
+        return ST_OUT_OF_RANGE;
+
+    *elem = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
+
+    return ST_OK;
+}
+
+static ret_t vector_set(vector_t *vec, size_t idx, void *elem) {
+    if (idx >= vec->size)
+        return ST_OUT_OF_RANGE;
+
+    void *el = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
+
+    memcpy(el, elem, vec->elem_size);
+
+    return ST_OK;
+
+}
+
+typedef void(*vector_foreach_cb)(size_t, size_t, void *, void *);
+
+static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
+    size_t n = vec->size;
+    for (size_t i = 0; i < n; ++i) {
+        void *v = (void *) &(vec->alloc->ptr[vec->elem_size * i]);
+        cb(i, vec->elem_size, ctx, v);
+    }
 }
 
 
@@ -2370,15 +2788,23 @@ static ret_t test_slist();
 
 static void test_hash_bt();
 
-static void da_test();
+static void test_da();
 
-static void string_test();
+static void test_string();
 
 static void test_ret();
 
 
-static void run_tests() {
+static void tests_run() {
     test_ret();
+    test_da();
+    test_string();
+    test_hash_bt();
+    //test_list();
+    test_fifo();
+    test_lifo();
+    test_slist();
+
 }
 
 static void test_hash_bt() {
@@ -3875,7 +4301,7 @@ int main() {
     enable_stderr(true);
 
 
-    run_tests();
+    tests_run();
 
 //
 //    struct A* a = OBJECT_CREATE(struct A);
