@@ -37,6 +37,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <blkid/blkid.h> // apt install libblkid-dev
 #include <ncurses.h>     // apt install libncurses5-dev
 #include <stdbool.h>
+#include <mcheck.h>
 
 //=======================================================================
 // LOG
@@ -272,6 +273,10 @@ enum {
     ST_SIZE_EXCEED,
     ST_UNKNOWN
 };
+
+
+
+typedef void(*data_release_cb)(void* p);
 
 //======================================================================================================================
 // RETURN MSG
@@ -514,14 +519,7 @@ static ret_t ht_create_value(void *p, size_t size, ht_value_t **value) {
 //======================================================================================================================
 
 
-static hashtable_t *alloc_table = NULL;
 
-struct _IO_FILE *stdout_orig;
-struct _IO_FILE *stderr_orig;
-struct _IO_FILE *stdtrace;
-static FILE *stdtest;
-//static char* stdtest_buf;
-//static size_t stdtest_size;
 static const size_t size_npos = (size_t) -1;
 // init gloabls
 
@@ -536,35 +534,14 @@ static ret_t init_gloabls() {
     //setvbuf(stdout, NULL, _IONBF, 0);
 
 #ifdef ENABLE_LOGGING
-    init_log(LOGLEVEL_ALL);
+    init_log(LOGLEVEL_DEBUG);
 #endif
-
-    stdout_orig = stdout;
-    stderr_orig = stderr;
-
-    //ht_init(&alloc_table);
-
-    //stdtest = open_memstream(&stdtest_buf, &stdtest_size);
-    stdtest = fopen("/dev/null", "w");
-    stdtrace = fopen("/dev/null", "w");
 
     string_init_globals();
 
     return 0;
 }
 
-
-static void enable_stdout(bool b) {
-    if (b) stdout = stdout_orig;
-    else
-        stdout = stdtest;
-}
-
-static void enable_stderr(bool b) {
-    if (b) stderr = stderr_orig;
-    else
-        stderr = stdtest;
-}
 
 
 static ret_t globals_shutdown() {
@@ -573,9 +550,6 @@ static ret_t globals_shutdown() {
     pthread_spin_destroy(&gmsg_tab_lock);
 #endif
 
-    //ht_destroy(alloc_table);
-    fclose(stdtest);
-
     return ST_OK;
 }
 
@@ -583,7 +557,7 @@ static ret_t globals_shutdown() {
 //======================================================================================================================
 // blob operations
 //======================================================================================================================
-
+/**
 typedef struct {
     uint64_t id;
     uint64_t ref;
@@ -662,10 +636,12 @@ static void object_release(void *a, size_t obj_size) {
 #define OBJECT_COPY(x, type) (type*)object_copy(x)
 #define OBJECT_RELEASE(x, type) object_release(x, sizeof(type))
 
+**/
 //===============================================================
 // ALLOCATORS
 //===============================================================
 
+/**
 typedef struct alloc_stat {
     uint64_t size;
 } alloc_stat_t;
@@ -700,30 +676,9 @@ static ret_t _record_alloc_get(void *ptr, alloc_stat_t **stat) {
     return ST_OK;
 }
 
-static void safe_free(void **pp) {
-    if (NULLPP(pp) || *pp == NULL)
-        return;
+**/
 
-
-//    alloc_stat_t *stat = NULL;
-//
-//    if (_record_alloc_get(*pp, &stat) == ST_OK) {
-//
-//        _record_alloc_set(*pp, 0);
-//
-//        if(stat->size > 0) {
-//            LOG_TRACE("found address: 0x%08lx size: %lu", (uint64_t) (uint64_t *) (*pp), stat->size);
-//        }
-//
-//        free(stat);
-//
-//    }
-
-    free(*pp);
-    *pp = NULL;
-
-
-}
+#define safe_free(p) if(p) { free(p); p = NULL; }
 
 
 static void *zalloc(size_t size) {
@@ -1133,16 +1088,16 @@ static ret_t da_init(dynamic_allocator_t **a) {
     return da_init_n(a, STRING_INIT_BUFFER);
 }
 
-static ret_t da_release(dynamic_allocator_t **a) {
-    if (NULLPP(a))
+static ret_t da_release(dynamic_allocator_t *a) {
+    if (!a)
         return return_create(ST_EMPTY);
 
-    if (*a) {
+    if (a) {
         LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
-                  (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
+                  a->ptr, a->size, a->used, a->mul);
 
-        if ((*a)->ptr) free((*a)->ptr);
-        safe_free((void **) a);
+        safe_free(a->ptr);
+        safe_free(a);
     }
 
     return return_create(ST_OK);;
@@ -1293,7 +1248,8 @@ static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
 
     a->used += (*b)->size;
 
-    da_release(b);
+    da_release(*b);
+    *b = NULL;
 
     DA_TRACE(a);
     ASSERT(*b == NULL);
@@ -1438,20 +1394,19 @@ static void test_da() {
     CHECK_RETURN(da_concant(da, de));
 
 
-    da_release(&da);
-    ASSERT(NULL == da);
-    da_release(&da2);
-    ASSERT(NULL == da2);
-    da_release(&db);
-    ASSERT(NULL == db);
-    da_release(&dc);
-    ASSERT(NULL == dc);
-    da_release(&dd);
-    ASSERT(NULL == dd);
-    da_release(&de);
-    ASSERT(NULL == de);
-    da_release(&df);
-    ASSERT(NULL == df);
+    da_release(da); da = NULL;
+
+    da_release(da2);  da2 = NULL;
+
+    da_release(db);  db = NULL;
+
+    da_release(dc); dc = NULL;
+
+    da_release(dd);  dd = NULL;
+
+    da_release(de);  de = NULL;
+
+    da_release(df);  df = NULL;
 }
 
 //=======================================================================
@@ -1481,8 +1436,13 @@ static ret_t string_init(string **sp) {
     return da_init(_dap(sp));
 }
 
-static ret_t string_release(string **s) {
-    return da_release(_dap(s));
+static ret_t string_release(string *s) {
+    return da_release(_da(s));
+}
+
+static void string_release_cb(void *p)
+{
+    string_release((string*)p);
 }
 
 static const char *string_cdata(string *s) {
@@ -1752,7 +1712,7 @@ static void test_string() {
 
 
     CHECK_RETURN(string_init(&a));
-    CHECK_RETURN(string_release(&a));
+    CHECK_RETURN(string_release(a)); a = NULL;
 
     CHECK_RETURN(string_create(&a, str1));
     CHECK_RETURN(string_comparez(a, str1));
@@ -1793,10 +1753,10 @@ static void test_string() {
     string_print(d);
 
 
-    string_release(&a);
-    string_release(&b);
-    string_release(&c);
-    string_release(&d);
+    string_release(a);
+    string_release(b);
+    string_release(c);
+    string_release(d);
 
 }
 
@@ -1814,34 +1774,28 @@ typedef struct fifo {
     fifo_node_t *head;
     fifo_node_t* top;
     size_t size;
-    size_t elem_size;
+    data_release_cb rel_cb;
 
 } fifo_t;
 
 
-static void fifo_init(fifo_t **l, size_t elem_size) {
+static void fifo_init(fifo_t **l, data_release_cb cb) {
     *l = zalloc(sizeof(fifo_t));
-    (*l)->elem_size = elem_size;
+    (*l)->rel_cb = cb;
 }
 
 static void fifo_node_init(fifo_node_t **node) {
     *node = zalloc(sizeof(fifo_node_t));
 }
 
-static void *fifo_dub_data(fifo_t *l, const void *data) {
-    void *v = zalloc(l->elem_size);
-    memcpy(v, data, l->elem_size);
-    return v;
-}
-
-static void fifo_push(fifo_t *l, const void *s) {
+static void fifo_push(fifo_t *l, void *s) {
 
     if (!l->head) {
         fifo_node_init(&l->head);
 
         fifo_node_t *node = l->head;
 
-        node->data = fifo_dub_data(l, s);
+        node->data = s;
 
         l->top = l->head;
     }
@@ -1849,7 +1803,7 @@ static void fifo_push(fifo_t *l, const void *s) {
     {
         fifo_node_t *node = NULL;
         fifo_node_init(&node);
-        node->data = fifo_dub_data(l, s);
+        node->data = s;
         l->top->next = node;
 
 
@@ -1869,20 +1823,21 @@ static void* fifo_pop(fifo_t *l) {
     l->size--;
 
     void* p = tmp->data;
-    safe_free((void**)&tmp);
+    safe_free(tmp);
 
     return p;
 }
 
-static ret_t fifo_release(fifo_t **l) {
-    if (NULLPP(l) && *l == NULL)
-        return return_create(ST_EMPTY);
+static ret_t fifo_release(fifo_t *l, bool data_release) {
 
+    void* p = NULL;
+    while((p = fifo_pop(l)))
+    {
+        if(data_release)
+            l->rel_cb(p);
+    }
 
-
-    while(fifo_pop(*l));
-
-    safe_free((void**)l);
+    safe_free(l);
 
 
     return RET_OK;
@@ -1891,11 +1846,11 @@ static ret_t fifo_release(fifo_t **l) {
 
 void test_fifo()
 {
-    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    static uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 
     fifo_t* f = NULL;
-    fifo_init(&f, sizeof(uint64_t));
+    fifo_init(&f, NULL);
 
     fifo_push(f, &ii[0]);
     fifo_push(f, &ii[1]);
@@ -1913,11 +1868,10 @@ void test_fifo()
     {
         ASSERT(ii[i++] == *p);
         LOG_TRACE("fifo %lu", *p);
-        free(p);
     }
 
 
-    fifo_release(&f);
+    fifo_release(f, false);
 
 }
 
@@ -1934,40 +1888,34 @@ typedef struct lifo_node {
 typedef struct lifo {
     lifo_node_t *head;
     size_t size;
-    size_t elem_size;
+    data_release_cb rel_cb;
 
 } lifo_t;
 
 
-static void lifo_init(lifo_t **l, size_t elem_size) {
+static void lifo_init(lifo_t **l, data_release_cb cb) {
     *l = zalloc(sizeof(lifo_t));
-    (*l)->elem_size = elem_size;
+    (*l)->rel_cb = cb;
 }
 
 static void lifo_node_init(lifo_node_t **node) {
     *node = zalloc(sizeof(lifo_node_t));
 }
 
-static void *lifo_dub_data(lifo_t *l, const void *data) {
-    void *v = zalloc(l->elem_size);
-    memcpy(v, data, l->elem_size);
-    return v;
-}
-
-static void lifo_push(lifo_t *l, const void *s) {
+static void lifo_push(lifo_t *l, void *s) {
 
     if (!l->head) {
         lifo_node_init(&l->head);
 
         lifo_node_t *node = l->head;
 
-        node->data = lifo_dub_data(l, s);
+        node->data = s;
     }
     else
     {
         lifo_node_t *node = NULL;
         lifo_node_init(&node);
-        node->data = lifo_dub_data(l, s);
+        node->data = s;
         node->prev = l->head;
 
 
@@ -1986,20 +1934,21 @@ static void* lifo_pop(lifo_t *l) {
     l->size--;
 
     void* p = tmp->data;
-    safe_free((void**)&tmp);
+    safe_free(tmp);
 
     return p;
 }
 
-static ret_t lifo_release(lifo_t **l) {
-    if (NULLPP(l) && *l == NULL)
-        return return_create(ST_EMPTY);
+static ret_t lifo_release(lifo_t *l, bool data_release) {
 
+    void* p = NULL;
+    while((p = lifo_pop(l)))
+    {
+        if(data_release)
+            l->rel_cb(p);
+    }
 
-
-    while(lifo_pop(*l));
-
-    safe_free((void**)l);
+    safe_free(l);
 
 
     return RET_OK;
@@ -2008,11 +1957,11 @@ static ret_t lifo_release(lifo_t **l) {
 
 void test_lifo()
 {
-    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    static uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 
     lifo_t* f = NULL;
-    lifo_init(&f, sizeof(uint64_t));
+    lifo_init(&f, NULL);
 
     lifo_push(f, &ii[0]);
     lifo_push(f, &ii[1]);
@@ -2030,11 +1979,10 @@ void test_lifo()
     {
         ASSERT(ii[i--] == *p);
         LOG_TRACE("lifo %lu", *p);
-        free(p);
     }
 
 
-    lifo_release(&f);
+    lifo_release(f, false);
 
 }
 
@@ -2054,34 +2002,56 @@ typedef struct list {
     list_node_t *head;
     list_node_t *tail;
     size_t size;
-    size_t elem_size;
+    data_release_cb rel_cb;
 
 } list_t;
 
+typedef struct list_iter
+{
+  list_node_t* node;
+} list_iter_t;
 
-static void list_init(list_t **l, size_t elem_size) {
+
+static void list_iter_init(list_t* l, list_iter_t** it)
+{
+    *it = zalloc(sizeof(list_iter_t));
+    (*it)->node = l->head;
+}
+
+static void list_iter_release(list_iter_t* it)
+{
+    safe_free(it);
+}
+
+static void* list_iter_next(list_iter_t* it)
+{
+    if(it->node == NULL)
+        return NULL;
+
+    void* p = it->node->data;
+    it->node = it->node->next;
+
+    return p;
+}
+
+
+static void list_init(list_t **l, data_release_cb cb) {
     *l = zalloc(sizeof(list_t));
-    (*l)->elem_size = elem_size;
+    (*l)->rel_cb = cb;
 }
 
 static void list_node_init(list_node_t **node) {
     *node = zalloc(sizeof(list_node_t));
 }
 
-static void *list_dub_data(list_t *l, const void *data) {
-    void *v = zalloc(l->elem_size);
-    memcpy(v, data, l->elem_size);
-    return v;
-}
-
-static void list_push(list_t *l, const void *s) {
+static void list_push(list_t *l, void *s) {
 
     if (!l->head) {
         list_node_init(&l->head);
 
         list_node_t *node = l->head;
 
-        node->data = list_dub_data(l, s);
+        node->data = s;
 
         l->tail = l->head;
     }
@@ -2089,16 +2059,24 @@ static void list_push(list_t *l, const void *s) {
     {
         list_node_t *node = NULL;
         list_node_init(&node);
+        node->data = s;
 
-        list_node_t *tail = l->head;
-        node->data = list_dub_data(l, s);
-        node->prev = l->head;
-        node->next = l->head->prev;
-        l->head = node;
+        list_node_t* tail = l->head;
+        while(tail->next)
+        {
+            tail = tail->next;
+        }
+
+        tail->next = node;
+
+        node->prev = tail;
 
 
-        l->tail = tail;
+        l->tail = node;
+
     }
+
+    ++l->size;
 }
 
 static void *list_pop_head(list_t *l) {
@@ -2106,11 +2084,11 @@ static void *list_pop_head(list_t *l) {
         return NULL;
 
     list_node_t *tmp = l->head;
-    l->head = tmp->prev;
+    l->head = tmp->next;
     l->size--;
 
     void *data = tmp->data;
-    safe_free((void **) &tmp);
+    free(tmp);
 
     return data;
 }
@@ -2120,44 +2098,38 @@ static void *list_crop_tail(list_t *l) {
         return NULL;
 
     list_node_t *tmp = l->tail;
-    l->tail = tmp->next;
+    l->tail = tmp->prev;
     l->size--;
 
     void *data = tmp->data;
-    safe_free((void **) &tmp);
+    free(tmp);
 
     return data;
 }
 
-static list_node_t *list_next(list_node_t *node) {
-    if (!node) return NULL;
-
-    return node->next;
-}
-
-static list_node_t *list_prev(list_node_t *node) {
-    if (!node) return NULL;
-
-    return node->prev;
-}
-
-static ret_t list_release(list_t **l) {
-    if (NULLPP(l) && *l == NULL)
+static ret_t list_release(list_t *l, bool release_data) {
+    if (!l)
         return ST_EMPTY;
 
 
-    list_node_t *head = (*l)->head;
+    list_node_t *head = l->head;
     while (head) {
+
+        list_node_t *tmp = head;
+
+        if(release_data)
+            l->rel_cb(tmp->data);
+
+
+        free(tmp);
+
 
         head = head->next;
 
-        list_node_t *tmp = head;
-        safe_free((void **) &tmp);
+        memset(tmp, 0, sizeof(list_node_t));
     }
 
-    safe_free((void **) l);
-    *l = NULL;
-
+    free(l);
 
     return ST_OK;
 
@@ -2176,7 +2148,8 @@ static ret_t list_merge(list_t *a, list_t *b) {
     return ST_OK;
 }
 
-static ret_t list_remove(list_t *l, void *data) {
+//TODO segfault
+static ret_t list_remove(list_t *l, const void *data) {
     list_node_t *head = l->head;
 
     while (head) {
@@ -2184,19 +2157,20 @@ static ret_t list_remove(list_t *l, void *data) {
             list_node_t *hn = head->next;
             list_node_t *hp = head->prev;
 
-            hn->prev = hp;
-            hp->next = hn;
+            hn->prev->next = hp;
+            hp->next->prev = hn;
 
             free(head);
+            --l->size;
 
-            return ST_OK;
+            return RET_OK;
 
         }
 
         head = head->next;
     }
 
-    return ST_NOT_FOUND;
+    return return_create(ST_NOT_FOUND);
 }
 
 typedef void(*list_traverse_cb)(list_node_t *);
@@ -2208,14 +2182,9 @@ static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
 
     list_node_t *cur = forward ? l->tail : l->head;
 
-//    while (cur != (forward? l->head : l->tail)) {
-//        cb(cur);
-//        cur = forward ? cur->next : cur->next;
-//    }
-
     while (cur) {
         cb(cur);
-        cur = forward ? cur->next : cur->prev;
+        cur = forward ? cur->prev : cur->next;
     }
 
     return ST_OK;
@@ -2229,9 +2198,9 @@ void test_list_traverse(list_node_t* node)
 
 void test_list()
 {
-    static const uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    static uint64_t ii[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
     list_t* l = NULL;
-    list_init(&l, sizeof(uint64_t));
+    list_init(&l, NULL);
 
     ASSERT(l != NULL);
 
@@ -2249,7 +2218,7 @@ void test_list()
     list_traverse(l, false, &test_list_traverse);
     list_traverse(l, true, &test_list_traverse);
 
-    list_node_t* head = l->head;
+    list_node_t* head = l->tail;
     size_t i = 7;
     while(head)
     {
@@ -2262,10 +2231,20 @@ void test_list()
         head = head->prev;
     }
 
-    list_release(&l);
+    i = 0;
+    uint64_t* pdata = NULL;
+    while((pdata = list_pop_head(l)))
+    {
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pdata);
+        ASSERT(ii[i] == *pdata);
+
+        ++i;
+    }
+
+    list_release(l, false); l = NULL;
     ASSERT(l == NULL);
 
-    list_init(&l, sizeof(uint64_t));
+    list_init(&l, NULL);
 
     ASSERT(l != NULL);
 
@@ -2293,8 +2272,104 @@ void test_list()
         head = head->next;
     }
 
-    list_release(&l);
+
+    i = 0;
+    while((pdata = list_pop_head(l)))
+    {
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pdata);
+        ASSERT(ii[i] == *pdata);
+
+        ++i;
+    }
+
+
+    list_release(l, false); l = NULL;
     ASSERT(l == NULL);
+
+//// remove test failed
+//    list_init(&l, sizeof(uint64_t));
+//
+//    ASSERT(l != NULL);
+//
+//    list_push(l, &ii[0]);
+//    list_push(l, &ii[1]);
+//    list_push(l, &ii[2]);
+//    list_push(l, &ii[3]);
+//    list_push(l, &ii[4]);
+//    list_push(l, &ii[5]);
+//    list_push(l, &ii[6]);
+//    list_push(l, &ii[7]);
+//
+//
+//    list_remove(l, &ii[1]);
+//    list_remove(l, &ii[3]);
+//    list_remove(l, &ii[5]);
+//    list_remove(l, &ii[7]);
+//
+//    ASSERT(l->size == 4);
+//
+//    head = l->head;
+//    while(head)
+//    {
+//        uint64_t* pi = (uint64_t*)head->data;
+//
+//        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
+//        ASSERT((*pi % 2) == 0);
+//
+//        head = head->next;
+//    }
+
+
+    list_t* l2 = NULL;
+    list_init(&l, NULL);
+    list_init(&l2, NULL);
+
+    ASSERT(l != NULL);
+    ASSERT(l2 != NULL);
+
+    list_push(l, &ii[0]);
+    list_push(l, &ii[1]);
+    list_push(l, &ii[2]);
+    list_push(l, &ii[3]);
+    list_push(l2, &ii[4]);
+    list_push(l2, &ii[5]);
+    list_push(l2, &ii[6]);
+    list_push(l2, &ii[7]);
+
+
+    list_merge(l, l2);
+
+
+    head = l->head;
+    i = 0;
+    while(head)
+    {
+        uint64_t* pi = (uint64_t*)head->data;
+
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
+        ASSERT(ii[i] == *pi);
+
+        ++i;
+        head = head->next;
+    }
+
+    head = l->tail;
+    i = 7;
+    while(head)
+    {
+        uint64_t* pi = (uint64_t*)head->data;
+
+        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
+        ASSERT(ii[i] == *pi);
+
+        --i;
+        head = head->prev;
+    }
+
+    list_release(l, false); l = NULL;
+    ASSERT(l == NULL);
+    list_release(l2, false); l2 = NULL;
+    ASSERT(l2 == NULL);
 }
 
 
@@ -2302,195 +2377,54 @@ void test_list()
 // SLIST
 //=======================================================================
 
+static void slist_fprint(list_t *sl) {
 
-typedef struct snode {
-    string *s;
-    struct snode *prev;
-    struct snode *next;
-
-} snode;
-
-typedef struct {
-    snode *head;
-    snode *tail;
-    size_t size;
-    snode *cur;
-    char delm;
-
-} slist;
-
-
-static void slist_init(slist **sl) {
-    *sl = zalloc(sizeof(slist));
-    (*sl)->delm = ',';
-}
-
-static void snode_init(snode **node) {
-    *node = zalloc(sizeof(snode));
-}
-
-
-static void slist_set_delm(slist *sl, char delm) {
-    sl->delm = delm;
-}
-
-static void snode_append(slist *sl, snode *node, snode *prev, string *s) {
-    if (!node)
-        snode_init(&node);
-
-    if (node->s == NULL) {
-        node->s = s;
-        node->prev = prev;
-
-        if (prev) prev->next = node;
-
-        sl->size++;
-        sl->tail = node;
+    if(!sl)
+    {
+        LOG_WARN("sl == NULL");
         return;
     }
 
-    snode_append(sl, node->next, node, s);
-
-}
-
-static void slist_append(slist *sl, string *s) {
-    if (!sl->head)
-        snode_init(&sl->head);
-
-    if (!sl->tail)
-        snode_init(&sl->tail);
-
-    snode_append(sl, sl->head, NULL, s);
-
-}
-
-static string *slist_pop_head(slist *sl) {
-    if (sl->size == 0) EXIT_ERROR("Empty list");
-
-    snode *tmp = sl->head;
-    sl->head = tmp->prev;
-    sl->size--;
-
-    string *s = tmp->s;
-    free(tmp);
-
-    return s;
-}
-
-static void slist_init_current(slist *sl) {
-    if (sl->size == 0) EXIT_ERROR("Empty list");
-
-    sl->cur = sl->head;
-}
-
-static string *slist_next(slist *sl) {
-    if (sl->cur == NULL)
-        return NULL;
-
-    string *s = sl->cur->s;
-
-    sl->cur = sl->cur->next;
-
-    return s;
-}
-
-static ret_t slist_release(slist **sl, bool srelease) {
-    if (sl && *sl) {
-        snode *head = (*sl)->head;
-        while (head) {
-            if (srelease)
-                string_release(&head->s);
-
-            head = head->next;
-
-            snode *tmp = head;
-            safe_free((void **) &tmp);
-        }
-
-        safe_free((void **) sl);
-    }
-
-    return ST_OK;
-
-}
-
-static void slist_merge(slist *a, slist *b) {
-    if (a->size == 0 && b->size == 0) {
-        LOG_WARN("lists must contain at least one element");
-        return;
-    }
-
-
-    a->tail->next = b->head;
-    b->head->prev = a->tail;
-    a->size += b->size;
-    a->tail = b->tail;
-}
-
-static void slist_remove(slist *sl, string *s) {
-    snode *head = sl->head;
-
+    list_node_t *head = sl->head;
     while (head) {
-        if (head->s == s) {
-            snode *hn = head->next;
-            snode *hp = head->prev;
-
-            hn->prev = hp;
-            hp->next = hn;
-
-            free(head);
-
-            return;
-
-        }
-
-        head = head->next;
-    }
-}
-
-static ret_t slist_find_eq(slist *sl, string *s, string **found) {
-    snode *head = sl->head;
-
-    while (head) {
-        if (string_compare(head->s, s) == ST_OK) {
-            *found = head->s;
-            return ST_OK;
-        }
-
-        head = head->next;
-    }
-
-    return ST_NOT_FOUND;
-}
-
-static void slist_fprint(slist *sl, FILE *output) {
-    snode *head = sl->head;
-    while (head) {
-
+        string* s = (string*)head->data;
 #ifdef NDEBUG
-        string_print(head->s);
+        string_print(s);
 #else
-        string_printd(head->s);
+        string_printd(s);
 #endif
 
         head = head->next;
     }
 }
 
-static void slist_rfprint(slist *sl, FILE *output) {
-    snode *tail = sl->tail;
+static void slist_rfprint(list_t *sl) {
+    if(!sl)
+    {
+        LOG_WARN("sl == NULL");
+        return;
+    }
+
+
+    list_node_t *tail = sl->tail;
 
     while (tail) {
+        string* s = (string*)tail->data;
 #ifdef NDEBUG
-        string_print(tail->s);
+        string_print(s);
 #else
-        string_printd(tail->s);
+        string_printd(s);
 #endif
         tail = tail->prev;
     }
 }
 
-static ret_t string_split(string *s, char delm, slist **sl) {
+string* slist_next(list_iter_t* it)
+{
+    return (string*)list_iter_next(it);
+}
+
+static ret_t string_split(string *s, char delm, list_t **l) {
     if (string_size(s) == 0)
         return ST_EMPTY;
 
@@ -2498,7 +2432,7 @@ static ret_t string_split(string *s, char delm, slist **sl) {
     string_rstrip_ws(s);
     string_remove_dubseq(s, delm, 1);
 
-    slist_init(sl);
+    list_init(l, &string_release_cb);
     char *cb = NULL;
     char *end = NULL;
 
@@ -2515,7 +2449,7 @@ static ret_t string_split(string *s, char delm, slist **sl) {
             string_init(&ss);
             string_appendn(ss, cb, (size_t) (ccur - cb));
 
-            slist_append(*sl, ss);
+            list_push(*l, ss);
 
             cb = ++ccur;
         }
@@ -2545,7 +2479,7 @@ static ret_t vector_init(vector_t **vec, size_t elem_size) {
 }
 
 static ret_t vector_release(vector_t *vec) {
-    da_release(&vec->alloc);
+    da_release(vec->alloc);
     free(vec);
 
     return ST_OK;
@@ -2600,36 +2534,35 @@ static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
 typedef struct bt_node {
     uint64_t hash_key;
     void *data;
-    size_t size;
     struct bt_node *prev;
     struct bt_node *left;
     struct bt_node *right;
+    data_release_cb rel_cb;
 
 } bt_node_t;
 
-static ret_t bt_node_create(bt_node_t **bt, uint64_t hash, void *data, size_t size) {
+static ret_t bt_node_create(bt_node_t **bt, uint64_t hash, void *data) {
     *bt = zalloc(sizeof(bt_node_t));
     bt_node_t *b = *bt;
     b->hash_key = hash;
 
-    b->data = zalloc(size);
-    memcpy(b->data, data, size);
+    b->data = data;
 
     return ST_OK;
 }
 
-static ret_t bt_node_release(bt_node_t **bt) {
+static ret_t bt_node_release(bt_node_t *bt, bool release_data) {
 
-    if (NULLPP(bt))
-        return ST_EMPTY;
+    if (bt != NULL) {
 
-    if (*bt != NULL) {
+        bt_node_release(bt->left, release_data);
+        bt_node_release(bt->right, release_data);
 
-        bt_node_release(&(*bt)->left);
-        bt_node_release(&(*bt)->right);
 
-        safe_free(&(*bt)->data);
-        safe_free((void **) bt);
+        if(release_data)
+            bt->rel_cb(bt->data);
+
+        safe_free(bt);
 
     }
 
@@ -2637,29 +2570,29 @@ static ret_t bt_node_release(bt_node_t **bt) {
 }
 
 
-static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, size_t size) {
+static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, data_release_cb rel_cb) {
     if (*bt == NULL) {
         *bt = zalloc(sizeof(bt_node_t));
         bt_node_t *b = *bt;
         b->hash_key = hash;
         b->prev = prev;
+        b->rel_cb = rel_cb;
 
-        b->data = zalloc(size);
-        memcpy(b->data, data, size);
+        b->data = data;
 
         return ST_OK;
     } else {
         bt_node_t *b = *bt;
 
         if (b->hash_key > hash)
-            return bt_node_set(&b->right, b, hash, data, size);
+            return bt_node_set(&b->right, b, hash, data, rel_cb);
         else if (b->hash_key < hash)
-            return bt_node_set(&b->left, b, hash, data, size);
+            return bt_node_set(&b->left, b, hash, data, rel_cb);
         else {
-            SAFE_RELEASE(b->data);
 
-            b->data = zalloc(size);
-            memcpy(b->data, data, size);
+            if((*bt)->rel_cb) (*bt)->rel_cb(b->data);
+
+            b->data = data;
 
             return ST_OK;
         }
@@ -2708,25 +2641,23 @@ static void bt_node_traverse(bt_node_t *bt, bt_node_traverse_cb cb) {
 
 typedef struct binary_tree {
     bt_node_t *head;
-    size_t elem_size;
+    data_release_cb rel_cb;
 } binary_tree_t;
 
 
-static ret_t bt_init(binary_tree_t **bt, size_t elem_size) {
+static ret_t bt_init(binary_tree_t **bt, data_release_cb cb) {
     *bt = zalloc(sizeof(binary_tree_t));
-    (*bt)->elem_size = elem_size;
+    (*bt)->rel_cb = cb;
 
     return ST_OK;
 }
 
-static ret_t bt_release(binary_tree_t **bt) {
-    if (NULLPP(bt))
-        return ST_EMPTY;
+static ret_t bt_release(binary_tree_t *bt, bool release_data) {
 
-    if (*bt != NULL) {
-        bt_node_release(&(*bt)->head);
+    if (bt != NULL) {
+        bt_node_release(bt->head, release_data);
 
-        safe_free((void **) bt);
+        safe_free(bt);
     }
 
     return ST_OK;
@@ -2749,16 +2680,22 @@ static str_int_t heap_str_int_decode(void *p) {
 
 static ret_t bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
     uint64_t hash = crc64s(key);
-    str_int_t data;
-    data.str = key;
-    data.i = i;
-    return bt_node_set(&bt->head, NULL, hash, &data, bt->elem_size);
+    str_int_t* data = zalloc(sizeof(str_int_t));
+    data->str = key;
+    data->i = i;
+    return bt_node_set(&bt->head, NULL, hash, data, bt->rel_cb);
+}
+
+static void bt_si_release(void* p)
+{
+    str_int_t* data = (str_int_t*)p;
+    free(data);
 }
 
 static ret_t bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
     uint64_t hash = crc64s(key);
     void *p = NULL;
-    int ret = bt_node_get(bt->head, hash, &p);
+    ret_t ret = bt_node_get(bt->head, hash, &p);
     if (ret != ST_OK)
         return ret;
 
@@ -2784,7 +2721,7 @@ static void bt_si_traverse(binary_tree_t *bt) {
 //=============================================================================================
 
 
-static ret_t test_slist();
+static ret_t test_split();
 
 static void test_hash_bt();
 
@@ -2800,17 +2737,17 @@ static void tests_run() {
     test_da();
     test_string();
     test_hash_bt();
-    //test_list();
     test_fifo();
     test_lifo();
-    test_slist();
+    test_list();
+    test_split();
 
 }
 
 static void test_hash_bt() {
     binary_tree_t *bt;
     str_int_t *node = NULL;
-    bt_init(&bt, sizeof(str_int_t));
+    bt_init(&bt, &bt_si_release);
 
     bt_si_set(bt, "1", 1);
     bt_si_set(bt, "2", 2);
@@ -2884,6 +2821,8 @@ static void test_hash_bt() {
 
 
     bt_si_traverse(bt);
+    bt_release(bt, true);
+    bt_init(&bt, &bt_si_release);
 
     bt_si_set(bt, "1", 0);
     bt_si_set(bt, "2", 0);
@@ -2961,104 +2900,11 @@ static void test_hash_bt() {
 
     bt_si_traverse(bt);
 
-    bt_release(&bt);
-
-    ASSERT(NULLPP(bt));
+    bt_release(bt, true);
+    bt = NULL;
 }
 
-static ret_t test_slist() {
-    slist *sl = NULL;
-    slist_init(&sl);
-
-    string *s1 = NULL;
-    string *s2 = NULL;
-    string *s3 = NULL;
-    string *s4 = NULL;
-    string *s5 = NULL;
-    string *s6 = NULL;
-    string *s7 = NULL;
-    string *s55 = NULL;
-
-
-    string_create(&s1, "test1");
-    string_create(&s2, "test2");
-    string_create(&s3, "test3");
-    string_create(&s4, "test4");
-    string_create(&s5, "test5");
-    string_create(&s6, "test6");
-    string_create(&s7, "test7");
-    string_create(&s55, "test5");
-
-
-    slist_append(sl, s1);
-    slist_append(sl, s2);
-    slist_append(sl, s3);
-    slist_append(sl, s4);
-    slist_append(sl, s5);
-    slist_append(sl, s6);
-    slist_append(sl, s7);
-
-
-    slist_fprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-    slist_rfprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-
-
-    string *found = NULL;
-    slist_find_eq(sl, s55, &found);
-
-
-    slist_remove(sl, found);
-
-    slist_fprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-    slist_rfprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-
-
-    slist *sl2 = NULL;
-    slist_init(&sl2);
-
-    string *s21 = NULL;
-    string *s22 = NULL;
-    string *s23 = NULL;
-    string *s24 = NULL;
-    string *s25 = NULL;
-    string *s26 = NULL;
-    string *s27 = NULL;
-
-
-    string_create(&s21, "Ivan");
-    string_create(&s22, "Lena");
-    string_create(&s23, "Carina");
-    string_create(&s24, "Dima");
-    string_create(&s25, "Misha");
-    string_create(&s26, "Andrey");
-    string_create(&s27, "Katy");
-
-    slist_append(sl2, s21);
-    slist_append(sl2, s22);
-    slist_append(sl2, s23);
-    slist_append(sl2, s24);
-    slist_append(sl2, s25);
-    slist_append(sl2, s26);
-    slist_append(sl2, s27);
-
-
-    slist_fprint(sl2, stdtest);
-    fprintf(stdtest, "\n\n");
-    slist_rfprint(sl2, stdtest);
-    fprintf(stdtest, "\n\n");
-
-
-    slist_merge(sl, sl2);
-
-    slist_fprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-    slist_rfprint(sl, stdtest);
-    fprintf(stdtest, "\n\n");
-
+static ret_t test_split() {
 
     string *text = NULL;
     string_init(&text);
@@ -3079,41 +2925,43 @@ static ret_t test_slist() {
                   "NAME=\"sdb1\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"2000397868544\" MODEL=\"\" LABEL=\"\" UUID=\"cdc9e724-a78b-4a25-9647-ad6390e235c3\" MOUNTPOINT=\"\"\n");
 
 
-    slist *blklist = NULL;
+    list_t *blklist = NULL;
     string_split(text, '\n', &blklist);
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
-    slist_fprint(blklist, stdout);
+    slist_fprint(blklist);
     fflush(stdout);
 
     string *tk = NULL;
-    slist_init_current(blklist);
-    while ((tk = slist_next(blklist)) != NULL) {
+    list_iter_t* blkit= NULL;
+    list_iter_init(blklist, &blkit);
+
+    while ((tk = slist_next(blkit)) != NULL) {
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
         string_printd(tk);
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist *tokens = NULL;
+        list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
 
-        slist_fprint(tokens, stdout);
-
-        slist_init_current(tokens);
+        slist_fprint(tokens);
 
         string *s = NULL;
-        while ((s = slist_next(tokens)) != NULL) {
-            slist *kv = NULL;
+        list_iter_t* token_it= NULL;
+        list_iter_init(blklist, &token_it);
+
+        while ((s = slist_next(token_it)) != NULL) {
+            list_t *kv = NULL;
             string_split(s, '=', &kv);
 
             fprintf(stdout, "------- TOKEN KEY-VALUE -----------\n");
-            slist_fprint(kv, stdout);
+            slist_fprint(kv);
 
 
-            slist_init_current(kv);
-            string *key = slist_next(kv);
-            string *val = slist_next(kv);
+            string *key = (string*)kv->head->data;
+            string *val = (string*)kv->head->next->data;
 
             string_strip(val);
 
@@ -3121,20 +2969,19 @@ static ret_t test_slist() {
             string_printd(key);
             string_printd(string_null);
 
-            slist_release(&kv, true);
+            list_release(kv, true); kv = NULL;
         }
 
-        slist_release(&tokens, true);
+        list_iter_release(token_it);
+        list_release(tokens, true); tokens = NULL;
 
     }
 
 
-    {
-        slist_release(&sl, true);
-        slist_release(&sl2, true);
-        slist_release(&blklist, true);
-        string_release(&text);
-    }
+    list_iter_release(blkit);
+    list_release(blklist, true); blklist = NULL;
+    string_release(text); text = NULL;
+
 
     return ST_OK;
 
@@ -3207,7 +3054,7 @@ static size_t get_sfile_size(const char *filename) {
     return (size_t) st.st_size;
 }
 
-typedef void(*cmd_exec_cb)(void *, slist *);
+typedef void(*cmd_exec_cb)(void *, list_t *);
 
 static void sfile_mmap(const char *filename, string *s) {
     size_t filesize = get_sfile_size(filename);
@@ -3258,14 +3105,14 @@ static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     char line[1024] = {0};
 
 
-    slist *sl;
-    slist_init(&sl);
+    list_t *sl;
+    list_init(&sl, &string_release_cb);
 
     while (fgets(line, sizeof(line), fpipe)) {
         string *s = NULL;
 
         string_create(&s, line);
-        slist_append(sl, s);
+        list_push(sl, s);
     }
 
     cb(ctx, sl);
@@ -3322,16 +3169,17 @@ static ret_t ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
     return ST_OK;
 }
 
-static void df_callback(void *ctx, slist *lines) {
+static void df_callback(void *ctx, list_t *lines) {
     df_t *df = (df_t *) ctx;
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
-    slist_fprint(lines, stdout);
+    slist_fprint(lines);
     fflush(stdout);
 
     string *tk = NULL;
-    slist_init_current(lines);
-    while ((tk = slist_next(lines)) != NULL) {
+    list_iter_t* line_it = NULL;
+    list_iter_init(lines, &line_it);
+    while ((tk = slist_next(line_it)) != NULL) {
 
         if (string_starts_with(tk, "/dev/") != ST_OK)
             continue;
@@ -3341,13 +3189,14 @@ static void df_callback(void *ctx, slist *lines) {
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist *tokens = NULL;
+        list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
 
-        slist_fprint(tokens, stdout);
+        slist_fprint(tokens);
 
-        slist_init_current(tokens);
 
+        list_iter_t* tk_it = NULL;
+        list_iter_init(tokens, &tk_it);
         //==============================
         // init df_stat
 
@@ -3360,7 +3209,7 @@ static void df_callback(void *ctx, slist *lines) {
         string *s = NULL;
         string *sname = NULL;
         uint64_t k = 0;
-        while ((s = slist_next(tokens)) != NULL) {
+        while ((s = slist_next(tk_it)) != NULL) {
 
             string_strip(s);
 
@@ -3396,9 +3245,9 @@ static void df_callback(void *ctx, slist *lines) {
         //add to ht, not need to free
         ht_set_df(df->stats, sname, stat);
 
-        string_release(&sname);
+        string_release(sname);
 
-        slist_release(&tokens, true);
+        list_release(tokens, true);
 
     }
 
@@ -3554,15 +3403,16 @@ static ret_t match_regex(regex_t *r, const char *to_match) {
 }
 
 
-static void sblk_callback(void *ctx, slist *lines) {
+static void sblk_callback(void *ctx, list_t *lines) {
 
     sblkid_t *sys = (sblkid_t *) ctx;
     ht_init(&sys->blk);
 
     {
         string *tk = NULL;
-        slist_init_current(lines);
-        while ((tk = slist_next(lines)) != NULL) {
+        list_iter_t* ln_it = NULL;
+        list_iter_init(lines, &ln_it);
+        while ((tk = slist_next(ln_it)) != NULL) {
 
             fprintf(stdout, "------- TOKEN LINE-----------\n");
             string_print(tk);
@@ -3586,25 +3436,27 @@ static void sblk_callback(void *ctx, slist *lines) {
     return;
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
-    slist_fprint(lines, stdout);
+    slist_fprint(lines);
     fflush(stdout);
 
     string *tk = NULL;
-    slist_init_current(lines);
-    while ((tk = slist_next(lines)) != NULL) {
+    list_iter_t* ln_it = NULL;
+    list_iter_init(lines, &ln_it);
+    while ((tk = slist_next(ln_it)) != NULL) {
 
         fprintf(stdout, "------- TOKEN LINE-----------\n");
         string_print(tk);
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
-        slist *tokens = NULL;
+        list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
 
 
-        slist_fprint(tokens, stdout);
+        slist_fprint(tokens);
 
-        slist_init_current(tokens);
+        list_iter_t* tk_it = NULL;
+        list_iter_init(tokens, &tk_it);
 
         //==============================
         // vector pair init
@@ -3617,19 +3469,21 @@ static void sblk_callback(void *ctx, slist *lines) {
 
         string *s = NULL;
         string *sname = NULL;
-        while ((s = slist_next(tokens)) != NULL) {
+        while ((s = slist_next(tk_it)) != NULL) {
 
 
-            slist *kv = NULL;
+            list_t *kv = NULL;
             string_split(s, '=', &kv);
 
             fprintf(stdout, "------- TOKEN KEY-VALUE -----------\n");
-            slist_fprint(kv, stdout);
+            slist_fprint(kv);
 
 
-            slist_init_current(kv);
-            string *key = slist_next(kv);
-            string *val = slist_next(kv);
+            list_iter_t* kv_it = NULL;
+            list_iter_init(kv, &kv_it);
+
+            string *key = slist_next(kv_it);
+            string *val = slist_next(kv_it);
 
             string_strip(val);
 
@@ -3644,16 +3498,16 @@ static void sblk_callback(void *ctx, slist *lines) {
             string_print(key);
             string_print(val);
 
-            slist_release(&kv, true);
+            list_release(kv, true); kv = NULL;
         }
 
 
         //add to ht, not need to free
         ht_set_s(sys->blk, sname, vec);
 
-        string_release(&sname);
+        string_release(sname); sname = NULL;
 
-        slist_release(&tokens, true);
+        list_release(tokens, true); tokens = NULL;
 
     }
 
@@ -4178,23 +4032,6 @@ typedef struct device {
 //    }
 //}
 
-struct A {
-    OBJECT_DECLARE()
-
-    int i;
-    char ch;
-
-    char *str;
-
-};
-
-static uint64_t total_leak = 0;
-
-void scan_alloc(uint64_t hash, ht_key_t *key, ht_value_t *val) {
-    fprintf(stderr, "[scan_alloc]: [0x%08lx] [0x%08lx] %lu bytes\n", hash, (uint64_t) val->ptr, val->size);
-    total_leak += val->size;
-    key->u.i = hash;
-}
 
 
 void scan_blk(uint64_t hash, ht_key_t *key, ht_value_t *val) {
@@ -4296,10 +4133,6 @@ int main() {
 
     check_style_defines();
     init_gloabls();
-
-    enable_stdout(true);
-    enable_stderr(true);
-
 
     tests_run();
 
