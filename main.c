@@ -79,11 +79,11 @@ static void _log(FILE* out, ...)
 #define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
 #define ASSERT_EQ(a, b) ((a == b)?__ASSERT_VOID_CAST (0): LOG_ASSERT("%s != %s [%lu] != [%lu]", #a, #b, a, b))
 
-//#define LOG_SHOW_TIME
-//#define LOG_SHOW_DATE
-//#define LOG_SHOW_THREAD
+#define LOG_SHOW_TIME
+#define LOG_SHOW_DATE
+#define LOG_SHOW_THREAD
 #define LOG_SHOW_PATH
-//#define LOG_ENABLE_MULTITHREADING
+#define LOG_ENABLE_MULTITHREADING
 
 #define LOG_FORMAT_BUFFER_MAX_SIZE 12400
 
@@ -122,13 +122,20 @@ static pthread_spinlock_t stdout_spinlock;
 #endif
 
 static int loglevel = LOGLEVEL_DEBUG;
+static FILE* stdlog = NULL;
 
-static void init_log(int loglvl) {
+static void log_init(int loglvl, const char* filename) {
     loglevel = loglvl;
 #ifdef LOG_ENABLE_MULTITHREADING
     pthread_spin_init(&stderr_spinlock, 0);
     pthread_spin_init(&stdout_spinlock, 0);
 #endif
+    stdlog = fopen(filename, "a");
+}
+
+static void log_shitdown()
+{
+    if(stdlog) fclose(stdlog);
 }
 
 static const char *loglevel_s(int lvl) {
@@ -206,24 +213,24 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
 
 #endif
 
-        fprintf(stdout, "%s", log_color(lvl));
+        fprintf(stdlog, "%s", log_color(lvl));
 #ifdef LOG_SHOW_TIME
-        fprintf(stdout, "[%02d:%02d:%02d]", tml->tm_hour, tml->tm_min, tml->tm_sec);
+        fprintf(stdlog, "[%02d:%02d:%02d]", tml->tm_hour, tml->tm_min, tml->tm_sec);
 #endif
 #ifdef LOG_SHOW_DATE
-        fprintf(stdout, "[%02d/%02d/%d]", tml->tm_mday, tml->tm_mon + 1, tml->tm_year - 100);
+        fprintf(stdlog, "[%02d/%02d/%d]", tml->tm_mday, tml->tm_mon + 1, tml->tm_year - 100);
 #endif
 #ifdef LOG_SHOW_THREAD
-        fprintf(stdout, "[0x%08x]", tid);
+        fprintf(stdlog, "[0x%08x]", tid);
 #endif
 
-        fprintf(stdout, "[%s][%s]: %s%s", loglevel_s(lvl), fun, buf, LOG_RESET);
+        fprintf(stdlog, "[%s][%s]: %s%s", loglevel_s(lvl), fun, buf, LOG_RESET);
 
 #ifdef LOG_SHOW_PATH
-        fprintf(stdout, " - %s:%d", file, line);
+        fprintf(stdlog, " - %s:%d", file, line);
 #endif
-        fprintf(stdout, "\n");
-        fflush(stdout);
+        fprintf(stdlog, "\n");
+        fflush(stdlog);
 
 #ifdef LOG_ENABLE_MULTITHREADING
         pthread_spin_unlock(&stdout_spinlock);
@@ -533,10 +540,6 @@ static ret_t init_gloabls() {
 #endif
     //disable buffering for stdout
     //setvbuf(stdout, NULL, _IONBF, 0);
-
-#ifdef ENABLE_LOGGING
-    init_log(LOGLEVEL_DEBUG);
-#endif
 
     string_init_globals();
 
@@ -949,7 +952,7 @@ static void ht_destroy(hashtable_t *ht) {
 static ret_t ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *value) {
     ht_item_t *item;
     if ((item = calloc(sizeof(ht_item_t), 1)) == NULL) {
-        fprintf(stderr, "[ht_create_item] can't alloc");
+        LOG_ERROR(" can't alloc");
         return ST_ERR;
     }
 
@@ -1447,48 +1450,6 @@ static bool regex_match(regex_t* r, const char* text)
     }
 
     return true;
-}
-
-/*
-  Match the string in "to_match" against the compiled regular
-  expression in "r".
- */
-
-static ret_t regex_match_ex(regex_t *r, const char *to_match) {
-    /* "P" is a pointer into the string which points to the end of the
-       previous match. */
-    const char *p = to_match;
-    /* "N_matches" is the maximum number of matches allowed. */
-    const int n_matches = 10;
-    /* "M" contains the matches found. */
-    regmatch_t m[n_matches];
-
-    while (1) {
-        int i = 0;
-        int nomatch = regexec(r, p, n_matches, m, 0);
-        if (nomatch) {
-            printf("No more matches.\n");
-            return nomatch;
-        }
-        for (i = 0; i < n_matches; i++) {
-            int start;
-            int finish;
-            if (m[i].rm_so == -1) {
-                break;
-            }
-            start = (int) (m[i].rm_so + (p - to_match));
-            finish = (int) (m[i].rm_eo + (p - to_match));
-            if (i == 0) {
-                printf("$& is ");
-            } else {
-                printf("$%d is ", i);
-            }
-            printf("'%.*s' (bytes %d:%d)\n", (finish - start),
-                   to_match + start, start, finish);
-        }
-        p += m[0].rm_eo;
-    }
-    return 0;
 }
 
 //=======================================================================
@@ -3066,9 +3027,8 @@ static ret_t test_split() {
     list_t *blklist = NULL;
     string_split(text, '\n', &blklist);
 
-    fprintf(stdout, "------- LINES OF TOKENS -----------\n");
+    LOG_TRACE( "------- LINES OF TOKENS -----------");
     slist_fprint(blklist);
-    fflush(stdout);
 
     string *tk = NULL;
     list_iter_t* blkit= NULL;
@@ -3076,10 +3036,10 @@ static ret_t test_split() {
 
     while ((tk = slist_next(blkit)) != NULL) {
 
-        fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_printd(tk);
+        LOG_TRACE("------- TOKEN LINE-----------");
+        string_printt(tk);
 
-        fprintf(stdout, "------- TOKEN SPLIT-----------\n");
+        LOG_TRACE("------- TOKEN SPLIT-----------");
 
         list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
@@ -3094,7 +3054,7 @@ static ret_t test_split() {
             list_t *kv = NULL;
             string_split(s, '=', &kv);
 
-            fprintf(stdout, "------- TOKEN KEY-VALUE -----------\n");
+            LOG_TRACE("------- TOKEN KEY-VALUE -----------");
             slist_fprint(kv);
 
 
@@ -3103,9 +3063,9 @@ static ret_t test_split() {
 
             string_strip(val);
 
-            fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
-            string_printd(key);
-            string_printd(string_null);
+            LOG_TRACE("------- STRIPED TOKEN KEY-VALUE -----------");
+            string_printt(key);
+            string_printt(string_null);
 
             list_release(kv, true); kv = NULL;
         }
@@ -3404,13 +3364,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%lf Kb/sec", hr_size);
+            string_appendf(speed, "%.2lf Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%lf Mb/sec", hr_size);
+            string_appendf(speed, "%.2lf Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%lf Gb/sec", hr_size);
+            string_appendf(speed, "%.2lf Gb/s", hr_size);
             break;
         default:
             break;
@@ -3428,13 +3388,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%lf Kb/sec", hr_size);
+            string_appendf(speed, "%.2lf Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%lf Mb/sec", hr_size);
+            string_appendf(speed, "%.2lf Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%lf Gb/sec", hr_size);
+            string_appendf(speed, "%.2lf Gb/s", hr_size);
             break;
         default:
             break;
@@ -3521,23 +3481,22 @@ static ret_t ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
 static void df_callback(void *ctx, list_t *lines) {
     df_t *df = (df_t *) ctx;
 
-    fprintf(stdout, "------- LINES OF TOKENS -----------\n");
+    LOG_TRACE("------- LINES OF TOKENS -----------");
     slist_fprint(lines);
-    fflush(stdout);
 
     string *tk = NULL;
     list_iter_t* line_it = NULL;
     list_iter_init(lines, &line_it);
     while ((tk = slist_next(line_it)) != NULL) {
 
-        fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_print(tk);
+        LOG_TRACE("------- TOKEN LINE-----------");
+        string_printt(tk);
 
 
         if (!string_re_match(tk, ".*(sd.*).*"))
             continue;
 
-        fprintf(stdout, "------- TOKEN SPLIT-----------\n");
+        LOG_TRACE("------- TOKEN SPLIT-----------");
 
         list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
@@ -3712,12 +3671,12 @@ static void sblk_callback(void *ctx, list_t *lines) {
         while ((tk = slist_next(ln_it)) != NULL) {
 
             LOG_INFO("------- TOKEN LINE-----------");
-            string_print(tk);
+            string_printt(tk);
 
 
             //================================
             regex_t re;
-            regex_compile(&re, "(\\w+)=\"([[:alnum:][:space:]-]*)\"");
+            regex_compile(&re, "(\\w+)=\"([[:alnum:][:space:]/-]*)\"");
 
             char *tkp = NULL;
             string_create_nt(tk, &tkp);
@@ -3752,16 +3711,10 @@ static void sblk_callback(void *ctx, list_t *lines) {
                     start = (int) (m[i].rm_so + (p - tkp));
                     finish = (int) (m[i].rm_eo + (p - tkp));
                     if (i == 0) {
-                        printf("$& is ");
                         continue;
                     }
                     if(i == 1)
                     {
-                        printf("$%d is ", i);
-
-                        printf("'%.*s' (bytes %d:%d)\n", (finish - start),
-                               tkp + start, start, finish);
-
                         //TODO leak
                         string_init(&key);
                         string_appendn(key, tkp+start, (finish - start));
@@ -3769,10 +3722,6 @@ static void sblk_callback(void *ctx, list_t *lines) {
 
                     } else if(i == 2)
                     {
-                        printf("$%d is ", i);
-
-                        printf("'%.*s' (bytes %d:%d)\n", (finish - start),
-                               tkp + start, start, finish);
 
                         if(finish-start != 0) {
 
@@ -4033,374 +3982,155 @@ static void scan_dir_dev(string* basedir, list_t* devs) {
 }
 
 
+#define COLON_OFFSET 1
+#define COLON_DEVICE COLON_OFFSET
+#define COLON_READ  (9 + COLON_OFFSET)
+#define COLON_WRITE (22 + COLON_OFFSET)
+#define COLON_SIZE (35 + COLON_OFFSET)
+#define COLON_USE  (46 + COLON_OFFSET)
+#define COLON_FILESYSTEM (58 + COLON_OFFSET)
+#define COLON_MOUNT (64 + COLON_OFFSET)
+#define COLON_MODEL (80 + COLON_OFFSET)
 
-//
-//private:
-//
-//    device_ptr get_dev_by_name(device_ptr base, const std::string &name) {
-//        if (base->name == name)
-//            return base;
-//        else if (base->childs.size() > 0) {
-//            for (size_t i = 0; i < base->childs.size(); ++i) {
-//                if (get_dev_by_name(base->childs[i], name))
-//                    return base->childs[i];
-//            }
-//        }
-//
-//        return nullptr;
-//    }
-//
-//    int enrich(device_ptr dev) {
-//        enrich_dev_stat(dev);
-//        enrich_etc(dev);
-//        enrich_size(dev);
-//
-//        return ST_OK;
-//    }
-//
-//    int enrich_etc(device_ptr dev) {
-//        sblkid_t blk;
-//        blk.exec("/dev/" + dev->name);
-//        dev->fs = blk.stat("FSTYPE");
-//        dev->model = blk.stat("MODEL");
-//        dev->mount = blk.stat("MOUNTPOINT");
-//        dev->uuid = blk.stat("UUID");
-//        dev->label = blk.stat("LABEL");
-//
-//        if (!dev->child) {
-//            dev->size = std::stoull(blk.stat("SIZE"));
-//            //dev->fsize = hr_size(dev->size);
-//        }
-//
-//        return ST_OK;
-//    }
-//
-//    int enrich_size(device_ptr dev) {
-//        df_t df;
-//        df.exec("/dev/" + dev->name);
-//
-//        if (dev->child) {
-//            dev->size = df.total();
-//            dev->used = df.used();
-//            dev->avail = df.avail();
-//            dev->perc = dev->used / (double) dev->size * 100.0;
-//        } else {
-//            for (auto ch : dev->childs) {
-//                dev->used += ch->used;
-//            }
-//
-//
-//            dev->perc = dev->used / (double) dev->size * 100.0;
-//        }
-//
-//
-//        auto hr_used = hr_size(dev->used);
-//        auto hr_total = hr_size(dev->size);
-//        auto hr_use = f2s(dev->perc, 2);
-//
-//        std::stringstream ss;
-//        ss << hr_used << "/" << hr_total;
-//
-//        dev->fuse = tostring(hr_use) + "%";
-//
-//        dev->fsize = ss.str();
-//
-//        return ST_OK;
-//    }
-//
-//    int enrich_dev_stat(device_ptr dev) {
-//        auto filename = dev->sysfolder + "/stat";
-//        auto data = read_all_file(filename);
-//
-//        data = data.substr(0, data.find_last_of('\n'));
-//
-//        std::regex re("([0-9]+)");
-//
-//        std::vector<uint64_t> v;
-//        for (auto it = std::sregex_iterator(data.begin(), data.end(), re);
-//             it != std::sregex_iterator(); ++it) {
-//            std::smatch m = *it;
-//            uint64_t i = std::stoull(m.str());
-//            v.push_back(i);
-//
-//        }
-//
-//        dev->stat = std::move(v);
-//
-//        return ST_OK;
-//    }
-//};
-//
-//class PerfMeter {
-//
-//    uint32_t sample_size_;
-//    const size_t BLOCK_SIZE = 512; // Unix block size
-//public:
-//    PerfMeter(uint32_t sample_size)
-//            : sample_size_(sample_size) {
-//    }
-//
-//    uint32_t sample_size() const { return sample_size_; }
-//
-//    std::vector<device_ptr> measure() {
-//        DeviceManager dm1;
-//        dm1.detect();
-//        dm1.enrich_devs();
-//
-//        std::this_thread::sleep_for(std::chrono::seconds(sample_size_));
-//
-//        DeviceManager dm2;
-//        dm2.detect();
-//        dm2.enrich_devs();
-//
-//        std::vector<device_ptr> devs1 = dm1.devs();
-//        std::vector<device_ptr> devs2 = dm2.devs();
-//
-//        if (devs1.size() != devs2.size())
-//            std::cerr << "Integrity of devices is corrupted" << std::endl;
-//
-//        std::vector<device_ptr> devs3;
-//        devs3.resize(devs2.size());
-//        for (size_t i = 0; i < devs2.size(); ++i) {
-//            devs3[i] = diff(devs1[i], devs2[i]);
-//        }
-//
-//        return devs3;
-//    }
-//
-//
-//private:
-//    std::string human_readable(uint64_t bytes) {
-//
-//        float r = bytes / 1024.f / sample_size_;
-//        if (r < 1024)  // KB / sec
-//            return f2s(r, 3) + " Kb/s";
-//
-//        r = bytes / 1024 / 1024 / sample_size_;
-//        if (r < 1024)  // MiB / sec
-//            return f2s(r, 3) + " Mb/s";
-//
-//        r = bytes / 1024 / 1024 / 1024 / sample_size_;
-//        return f2s(r, 3) + " Gb/s";
-//    }
-//
-//    inline device_ptr diff(device_ptr a, device_ptr b) {
-//        auto c = b->deepcopy();
-//        c->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
-//        c->stat[READ_SECTORS] = b->stat[READ_SECTORS] - a->stat[READ_SECTORS];
-//        c->perf["READ"] = human_readable(c->stat[READ_SECTORS] * BLOCK_SIZE);
-//        c->perf["WRITE"] = human_readable(c->stat[WRITE_SECTORS] * BLOCK_SIZE);
-//
-//        for (size_t i = 0; i < b->childs.size(); ++i) {
-//            auto cdev = c->childs[i];
-//            auto adev = a->childs[i];
-//            cdev->stat[WRITE_SECTORS] = cdev->stat[WRITE_SECTORS] - adev->stat[WRITE_SECTORS];
-//            cdev->stat[READ_SECTORS] = cdev->stat[READ_SECTORS] - adev->stat[READ_SECTORS];
-//            cdev->perf["READ"] = human_readable(cdev->stat[READ_SECTORS] * BLOCK_SIZE);
-//            cdev->perf["WRITE"] = human_readable(cdev->stat[WRITE_SECTORS] * BLOCK_SIZE);
-//
-//        }
-//
-//        return c;
-//
-//    }
-//};
-//
-//static ret_t statfs_dev() {
-//    const char *dev = "/usr/bin/gcc";
-//    struct statvfs64 fs;
-//
-//    int res = statvfs64(dev, &fs);
-//
-//    const uint64_t total = fs.f_blocks * fs.f_frsize;
-//    const uint64_t available = fs.f_bfree * fs.f_frsize;
-//    const uint64_t used = total - available;
-//    const double usedPercentage = ceil(used / total * 100.0);
-//
-//
-//    std::cout << dev << " " << std::fixed << total << " " << used << " " << available << " " << usedPercentage << "%"
-//              << std::endl;
-//
-//    return 0;
-//}
-//
-//
-//struct Colon {
-//    static const int OFFSET = 1;
-//    static const int DEVICE = OFFSET;
-//    static const int READ = 9 + OFFSET;
-//    static const int WRITE = 22 + OFFSET;
-//    static const int SIZE = 35 + OFFSET;
-//    static const int USE = 50 + OFFSET;
-//    static const int FILESYSTEM = 58 + OFFSET;
-//    static const int MOUNT = 64 + OFFSET;
-//    static const int MODEL = 80 + OFFSET;
-//};
-//
-//class Row {
-//    int row = 4;
-//
-//public:
-//    int operator++(int) {
-//        return row++;
-//    }
-//
-//    int operator++() {
-//        return ++row;
-//    }
-//
-//    operator int() {
-//        return row;
-//    }
-//};
-//
-//int ncurses_windows() {
-//    int mrow = 0, mcol = 0;
-//    initscr();            /* Start curses mode 		  */
-//
-//    if (has_colors() == FALSE) {
-//        endwin();
-//        printf("Your terminal does not support color\n");
-//        exit(1);
-//    }
-//
-//    //noecho();
-//    //cbreak();
-//    start_color();
-//
-//    init_pair(1, COLOR_WHITE, COLOR_BLACK);
-//    init_pair(2, COLOR_GREEN, COLOR_BLACK);
-//    init_pair(3, COLOR_CYAN, COLOR_BLACK);
-//
-//    getmaxyx(stdscr, mrow, mcol);
-//
-//    while (1) {
-//        Row row;
-//
-//        PerfMeter pm(1);
-//
-//        auto devs = pm.measure();
-//        clear();
-//
-//        attron(A_BOLD);
-//        attron(COLOR_PAIR(1));
-//
-//        mvaddstr(1, 1, "HWMonitor 0.1a\n");
-//
-//        std::stringstream ssize;
-//        ssize << "Sample size " << pm.sample_size() << "\n\n";
-//        mvaddstr(2, 1, ssize.str().c_str());
-//
-//
-//        mvaddstr(row, Colon::DEVICE, "Device");
-//        mvaddstr(row, Colon::READ, "Read");
-//        mvaddstr(row, Colon::WRITE, "Write");
-//        mvaddstr(row, Colon::SIZE, "Size");
-//        mvaddstr(row, Colon::USE, "Use");
-//        mvaddstr(row, Colon::FILESYSTEM, "FS");
-//        mvaddstr(row, Colon::MOUNT, "Mount");
-//        mvaddstr(row++, Colon::MODEL, "Model");
-//        attroff(COLOR_PAIR(1));
-//
-//
-//        for (auto dev : devs) {
-//            attron(COLOR_PAIR(2));
-//
-//            mvaddstr(row, Colon::DEVICE, dev->name.c_str());
-//            mvaddstr(row, Colon::READ, dev->perf["READ"].c_str());
-//            mvaddstr(row, Colon::WRITE, dev->perf["WRITE"].c_str());
-//            mvaddstr(row, Colon::SIZE, dev->fsize.c_str());
-//            mvaddstr(row, Colon::USE, dev->fuse.c_str());
-//            mvaddstr(row, Colon::FILESYSTEM, dev->fs.c_str());
-//            mvaddstr(row, Colon::MOUNT, dev->mount.c_str());
-//            mvaddstr(row++, Colon::MODEL, dev->model.c_str());
-//
-//            attroff(COLOR_PAIR(2));
-//            attron(COLOR_PAIR(3));
-//            for (auto child : dev->childs) {
-//                mvaddstr(row, Colon::DEVICE, child->name.c_str());
-//                mvaddstr(row, Colon::READ, child->perf["READ"].c_str());
-//                mvaddstr(row, Colon::WRITE, child->perf["WRITE"].c_str());
-//                mvaddstr(row, Colon::SIZE, child->fsize.c_str());
-//                mvaddstr(row, Colon::USE, child->fuse.c_str());
-//                mvaddstr(row, Colon::FILESYSTEM, child->fs.c_str());
-//                mvaddstr(row++, Colon::MOUNT, child->mount.c_str());
-//            }
-//
-//            attroff(COLOR_PAIR(3));
-//        }
-//
-//        attroff(A_BOLD);
-//
-//        refresh();            /* Print it on to the real screen */
-//    }
-//
-//    getch();
-//    endwin();
-//}
-//
-//
-//enum class PoArg {
-//    NO_NCURSES,
-//    DEBUG,
-//    NET
-//};
-//
-//
-//std::map<PoArg, std::string> po_arg_parse(int argc, char **argv) {
-//    std::map<PoArg, std::string> opts;
-//
-//    std::regex re("([tdn])");
-//    std::string args;
-//    for (int i = 1; i < argc; ++i)
-//        args += std::string(argv[i]) + " ";
-//
-//    for (auto it = std::sregex_iterator(args.begin(), args.end(), re);
-//         it != std::sregex_iterator();
-//         ++it) {
-//        std::smatch m = *it;
-//        if (m.str() == "t") opts[PoArg::NO_NCURSES] = "";
-//        if (m.str() == "d") opts[PoArg::DEBUG] = "";
-//        if (m.str() == "n") opts[PoArg::NET] = "";
-//    }
-//
-//    return opts;
-//}
-//
-//int text_windows() {
-//    for(;;) {
-//        PerfMeter pm(1);
-//
-//        auto devs = pm.measure();
-//
-//
-//        for (auto dev : devs) {
-//
-//            std::cout << dev->name << "\t" <<
-//                      dev->perf["READ"] << "\t" <<
-//                      dev->perf["WRITE"] << "\t" <<
-//                      dev->fsize << '\t' <<
-//                      dev->fuse << '\t' <<
-//                      dev->fs << '\t' <<
-//                      dev->mount << '\t' <<
-//                      dev->model << std::endl;
-//
-//            for (auto child : dev->childs) {
-//
-//                std::cout << child->name << "\t" <<
-//                          child->perf["READ"] << "\t" <<
-//                          child->perf["WRITE"] << "\t" <<
-//                          child->fsize << '\t' <<
-//                          child->fuse << '\t' <<
-//                          child->fs << '\t' <<
-//                          child->mount << '\t' <<
-//                          child->model << std::endl;
-//            }
-//
-//        }
-//
-//    }
-//}
+
+static list_t* ldevices = NULL;
+static bool ncurses_exit = false;
+static pthread_mutex_t ldevices_mtx;
+
+
+static void ncruses_print_hr(int row, int col, uint64_t value)
+{
+    double size = 0.0;
+    int type = 0;
+    human_readable_size(value, &size, &type);
+
+    char buffer[128] = {0};
+    switch(type)
+    {
+        case HR_SIZE_KB:
+            sprintf(buffer, "%.2f Kb", size);
+            break;
+        case HR_SIZE_MB:
+            sprintf(buffer, "%.2f Mb", size);
+            break;
+        case HR_SIZE_GB:
+            sprintf(buffer, "%.2f Gb", size);
+            break;
+        default:
+            break;
+    }
+
+    mvaddstr(row, col, buffer);
+}
+
+void ncurses_window() {
+    initscr();            /* Start curses mode 		  */
+
+    if (has_colors() == FALSE) {
+        endwin();
+        LOG_ERROR("Your terminal does not support color");
+        exit(EXIT_FAILURE);
+    }
+
+    noecho();
+    cbreak();
+    start_color();
+
+    init_pair(1, COLOR_WHITE, COLOR_BLACK);
+    init_pair(2, COLOR_GREEN, COLOR_BLACK);
+    init_pair(3, COLOR_CYAN, COLOR_BLACK);
+
+    while (!ncurses_exit) {
+        int row = 1;
+
+        clear();
+
+        attron(A_BOLD);
+        attron(COLOR_PAIR(1));
+
+        mvaddstr(row++, 1, "HWMonitor 0.1a\n");
+        mvaddstr(row++, 1, "Sample size 1.0 sec");
+
+
+        mvaddstr(row, COLON_DEVICE, "Device");
+        mvaddstr(row, COLON_READ, "Read");
+        mvaddstr(row, COLON_WRITE, "Write");
+        mvaddstr(row, COLON_SIZE, "Size");
+        mvaddstr(row, COLON_USE, "Use");
+        mvaddstr(row, COLON_FILESYSTEM, "FS");
+        mvaddstr(row, COLON_MOUNT, "Mount");
+        mvaddstr(row++, COLON_MODEL, "Model");
+        attroff(COLOR_PAIR(1));
+
+
+        pthread_mutex_lock(&ldevices_mtx);
+
+        if(ldevices == NULL)
+        {
+            usleep(100000);
+            if(ldevices == NULL) {
+                pthread_mutex_unlock(&ldevices_mtx);
+                continue;
+            }
+
+        }
+
+
+        list_iter_t* it = NULL;
+        list_iter_init(ldevices, &it);
+        device_t* dev = NULL;
+        while((dev = list_iter_next(it)))
+        {
+            attron(COLOR_PAIR(2));
+
+            char* name = string_makez(dev->name);
+            char* syspath = string_makez(dev->sysfolder);
+            char* fs = string_makez(dev->fs);
+            char* model = string_makez(dev->model);
+            char* mount = string_makez(dev->mount);
+            char* uuid = string_makez(dev->uuid);
+            char* label = string_makez(dev->label);
+            char* read  = string_makez(dev->perf_read);
+            char* write = string_makez(dev->perf_write);
+
+
+            mvaddstr(row, COLON_DEVICE, name);
+            mvaddstr(row, COLON_READ, read);
+            mvaddstr(row, COLON_WRITE, write);
+            ncruses_print_hr(row, COLON_SIZE, dev->size);
+            ncruses_print_hr(row, COLON_USE, dev->used);
+            mvaddstr(row, COLON_FILESYSTEM, fs);
+            mvaddstr(row, COLON_MOUNT, mount);
+            mvaddstr(row++, COLON_MODEL, model);
+
+            free(write);
+            free(read);
+            free(label);
+            free(uuid);
+            free(mount);
+            free(model);
+            free(fs);
+            free(syspath);
+            free(name);
+
+            attroff(COLOR_PAIR(2));
+        }
+
+        list_iter_release(it);
+
+        pthread_mutex_unlock(&ldevices_mtx);
+
+        attroff(A_BOLD);
+
+        refresh();            /* Print it on to the real screen */
+
+        usleep(100000);
+    }
+
+
+    endwin();
+}
+
 
 
 
@@ -4425,7 +4155,7 @@ void scan_df(uint64_t hash, ht_key_t *key, ht_value_t *val) {
     df_stat_t *stat = (df_stat_t *) val->ptr;
 
 
-    fprintf(stderr, "[scan_df][0x%08lx][%.*s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash,
+    LOG_TRACE("[0x%08lx][%.*s] SIZE=%lu USED=%lu AVAIL=%lu USE=%lu%% \n", hash,
             (int) string_size(stat->dev), string_cdata(stat->dev),
             stat->total, stat->used, stat->avail, stat->use);
 
@@ -4435,63 +4165,63 @@ void scan_df(uint64_t hash, ht_key_t *key, ht_value_t *val) {
 
 static void check_style_defines() {
 #ifdef _POSIX_SOURCE
-    printf("_POSIX_SOURCE defined\n");
+    LOG_TRACE("_POSIX_SOURCE defined");
 #endif
 
 #ifdef _POSIX_C_SOURCE
-    printf("_POSIX_C_SOURCE defined: %ldL\n", (long) _POSIX_C_SOURCE);
+    LOG_TRACE("_POSIX_C_SOURCE defined: %ldL", (long) _POSIX_C_SOURCE);
 #endif
 
 #ifdef _ISOC99_SOURCE
-    printf("_ISOC99_SOURCE defined\n");
+    LOG_TRACE("_ISOC99_SOURCE defined");
 #endif
 
 #ifdef _ISOC11_SOURCE
-    printf("_ISOC11_SOURCE defined\n");
+    LOG_TRACE("_ISOC11_SOURCE defined\n");
 #endif
 
 #ifdef _XOPEN_SOURCE
-    printf("_XOPEN_SOURCE defined: %d\n", _XOPEN_SOURCE);
+    LOG_TRACE("_XOPEN_SOURCE defined: %d\n", _XOPEN_SOURCE);
 #endif
 
 #ifdef _XOPEN_SOURCE_EXTENDED
-    printf("_XOPEN_SOURCE_EXTENDED defined\n");
+    LOG_TRACE("_XOPEN_SOURCE_EXTENDED defined\n");
 #endif
 
 #ifdef _LARGEFILE64_SOURCE
-    printf("_LARGEFILE64_SOURCE defined\n");
+    LOG_TRACE("_LARGEFILE64_SOURCE defined\n");
 #endif
 
 #ifdef _FILE_OFFSET_BITS
-    printf("_FILE_OFFSET_BITS defined: %d\n", _FILE_OFFSET_BITS);
+    LOG_TRACE("_FILE_OFFSET_BITS defined: %d\n", _FILE_OFFSET_BITS);
 #endif
 
 #ifdef _BSD_SOURCE
-    printf("_BSD_SOURCE defined\n");
+    LOG_TRACE("_BSD_SOURCE defined\n");
 #endif
 
 #ifdef _SVID_SOURCE
-    printf("_SVID_SOURCE defined\n");
+    LOG_TRACE("_SVID_SOURCE defined\n");
 #endif
 
 #ifdef _ATFILE_SOURCE
-    printf("_ATFILE_SOURCE defined\n");
+    LOG_TRACE("_ATFILE_SOURCE defined\n");
 #endif
 
 #ifdef _GNU_SOURCE
-    printf("_GNU_SOURCE defined\n");
+    LOG_TRACE("_GNU_SOURCE defined\n");
 #endif
 
 #ifdef _REENTRANT
-    printf("_REENTRANT defined\n");
+    LOG_TRACE("_REENTRANT defined\n");
 #endif
 
 #ifdef _THREAD_SAFE
-    printf("_THREAD_SAFE defined\n");
+    LOG_TRACE("_THREAD_SAFE defined\n");
 #endif
 
 #ifdef _FORTIFY_SOURCE
-    printf("_FORTIFY_SOURCE defined\n");
+    LOG_TRACE("_FORTIFY_SOURCE defined\n");
 #endif
 }
 
@@ -4593,7 +4323,10 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb)
 
     cb(devs_b);
 
-    list_release(devs_b, true);
+    pthread_mutex_lock(&ldevices_mtx);
+    if(ldevices) list_release(ldevices, true);
+    ldevices = devs_b;
+    pthread_mutex_unlock(&ldevices_mtx);
 
 }
 
@@ -4640,20 +4373,64 @@ void test_sampled_device(list_t* devs)
     list_iter_release(list_it);
 }
 
+void* start_device_sample(void* p)
+{
+    while(!ncurses_exit)
+        devices_sample(1.0, &test_sampled_device);
+
+    return p;
+}
+
+void sig_handler(int signo)
+{
+    if (signo == SIGUSR1)
+    {
+        LOG_ERROR("Stopping the programm [SIGTERM]");
+
+        // needed be an atomic
+        ncurses_exit = true;
+    }
+
+}
+
+void* start_sig_handler(void* p)
+{
+    signal(SIGUSR1, &sig_handler);
+
+    return p;
+}
+
 //=======================================================================================
 // MAIN
 //=======================================================================================
 
 int main() {
 
+#ifdef ENABLE_LOGGING
+    log_init(LOGLEVEL_ALL, "HWMonitor.log");
+#endif
+
     check_style_defines();
     init_gloabls();
-
     tests_run();
 
-    devices_sample(1.0, &test_sampled_device);
+    pthread_mutex_init(&ldevices_mtx, NULL);
+
+    pthread_t t;
+    pthread_create(&t, NULL, &start_device_sample, NULL);
+    pthread_detach(t);
+
+    pthread_t t2;
+    pthread_create(&t2, NULL, &start_sig_handler, NULL);
+    pthread_detach(t2);
+
+    ncurses_window();
 
     globals_shutdown();
+
+#ifdef ENABLE_LOGGING
+    log_shitdown();
+#endif
 
     return 0;
 }
