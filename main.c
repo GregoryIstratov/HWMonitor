@@ -38,6 +38,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <ncurses.h>     // apt install libncurses5-dev
 #include <stdbool.h>
 #include <mcheck.h>
+#include <dirent.h>
 
 //=======================================================================
 // LOG
@@ -84,7 +85,7 @@ static void _log(FILE* out, ...)
 #define LOG_SHOW_PATH
 //#define LOG_ENABLE_MULTITHREADING
 
-#define LOG_FORMAT_BUFFER_MAX_SIZE 2048
+#define LOG_FORMAT_BUFFER_MAX_SIZE 12400
 
 
 #define LOG_RED   "\x1B[31m"
@@ -1306,7 +1307,12 @@ static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
 }
 
 static ret_t da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
-    return return_create2(ST_OK, memcmp(a->ptr, b->ptr, MIN(a->used, b->used)));
+    if(a->used < b->used)
+        return return_create2(ST_NOT_FOUND, 1);
+    else if(a->used > b->used)
+        return return_create2(ST_NOT_FOUND, (uint16_t)-1);
+    else
+        return return_create2(ST_OK, memcmp(a->ptr, b->ptr, MIN(a->used, b->used)));
 }
 
 
@@ -1410,6 +1416,82 @@ static void test_da() {
 }
 
 //=======================================================================
+// REGEX
+//=======================================================================
+
+#define MAX_ERROR_MSG 0x1000
+
+/* Compile the regular expression described by "regex_text" into
+   "r". */
+
+static ret_t regex_compile(regex_t *r, const char *pattern) {
+    int status = regcomp(r, pattern, REG_EXTENDED | REG_NEWLINE);
+    if (status != 0) {
+        char error_message[MAX_ERROR_MSG];
+        regerror(status, r, error_message, MAX_ERROR_MSG);
+
+        LOG_ERROR("Regex error compiling '%s': %s",
+                  pattern, error_message);
+        return return_create(ST_ERR);
+    }
+    return ST_OK;
+}
+
+static bool regex_match(regex_t* r, const char* text)
+{
+    regmatch_t m[10];
+    int nomatch = regexec(r, text, 10, m, 0);
+    if(nomatch)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+/*
+  Match the string in "to_match" against the compiled regular
+  expression in "r".
+ */
+
+static ret_t regex_match_ex(regex_t *r, const char *to_match) {
+    /* "P" is a pointer into the string which points to the end of the
+       previous match. */
+    const char *p = to_match;
+    /* "N_matches" is the maximum number of matches allowed. */
+    const int n_matches = 10;
+    /* "M" contains the matches found. */
+    regmatch_t m[n_matches];
+
+    while (1) {
+        int i = 0;
+        int nomatch = regexec(r, p, n_matches, m, 0);
+        if (nomatch) {
+            printf("No more matches.\n");
+            return nomatch;
+        }
+        for (i = 0; i < n_matches; i++) {
+            int start;
+            int finish;
+            if (m[i].rm_so == -1) {
+                break;
+            }
+            start = (int) (m[i].rm_so + (p - to_match));
+            finish = (int) (m[i].rm_eo + (p - to_match));
+            if (i == 0) {
+                printf("$& is ");
+            } else {
+                printf("$%d is ", i);
+            }
+            printf("'%.*s' (bytes %d:%d)\n", (finish - start),
+                   to_match + start, start, finish);
+        }
+        p += m[0].rm_eo;
+    }
+    return 0;
+}
+
+//=======================================================================
 // STRING
 //=======================================================================
 
@@ -1470,6 +1552,7 @@ static ret_t string_create_nt(string *s, char **buff) {
     return ST_OK;
 }
 
+///deep copy
 static ret_t string_dub(string *s, string **ns) {
     return da_dub(_da(s), _dap(ns));
 }
@@ -1480,11 +1563,41 @@ static ret_t string_append(string *s, const char *str) {
 
 }
 
+static ret_t string_appendf(string* s, const char* fmt, ...)
+{
+    static const size_t FORMAT_BUFFER_SIZE = 4096;
+    va_list args;
+    va_start(args, fmt);
+
+    char buf[FORMAT_BUFFER_SIZE];
+    memset(buf, 0, FORMAT_BUFFER_SIZE);
+    vsnprintf(buf, FORMAT_BUFFER_SIZE, fmt, args);
+
+    va_end(args);
+
+    return string_append(s, buf);
+}
+
+static ret_t string_append_se(string* s, const char* start, const char* end)
+{
+    size_t sz = end - start;
+    return da_append(_da(s), start, sz);
+}
+
 static void string_init_globals() {
     string_init(&string_null);
     string_append(string_null, "(null)");
 }
 
+static char* string_makez(string* s)
+{
+    if(!s) return NULL;
+
+    size_t sz = _da(s)->used;
+    char* data = zalloc(sz + 1);
+    memcpy(data, _da(s)->ptr, sz);
+    return data;
+}
 
 static ret_t string_appendn(string *s, const char *str, size_t len) {
     return da_append(_da(s), str, len);
@@ -1658,12 +1771,37 @@ static ret_t string_starts_with(string *s, const char *str) {
     return return_create(ST_NOT_FOUND);
 }
 
+
+static bool string_re_match(string* s, const char* pattern)
+{
+    regex_t re;
+    regex_compile(&re, pattern);
+
+    char* text = string_makez(s);
+    bool m = regex_match(&re, text);
+    free(text);
+    regfree(&re);
+
+    return m;
+}
+
 static ret_t string_compare(string *a, string *b) {
     return da_compare(_da(a), _da(b));
 }
 
 static ret_t string_comparez(string *a, const char *str) {
-    return string_starts_with(a, str);
+    size_t ssize = strlen(str);
+    if(_da(a)->used > ssize)
+        return ST_ERR;
+    else if(_da(a)->used < ssize)
+        return ST_ERR;
+    else
+    {
+        if(memcmp(_da(a)->ptr, str, ssize) == 0)
+            return ST_OK;
+        else
+            return ST_ERR;
+    }
 }
 
 static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
@@ -2992,16 +3130,16 @@ static ret_t test_split() {
 
 enum {
     /// These values increment when an I/O request completes.
-            READ_IO = 0, ///requests - number of read I/Os processed
+            READ_IO         = 0, ///requests - number of read I/Os processed
 
     /// These values increment when an I/O request is merged with an already-queued I/O request.
-            READ_MERGE, /// requests - number of read I/Os merged with in-queue I/O
+            READ_MERGE      = 1, /// requests - number of read I/Os merged with in-queue I/O
 
     /// These values count the number of sectors read from or written to this block device.
     /// The "sectors" in question are the standard UNIX 512-byte sectors, not any device- or
     /// filesystem-specific block size.
     /// The counters are incremented when the I/O completes.
-            READ_SECTORS, /// requests - number of read I/Os merged with in-queue I/O
+            READ_SECTORS    = 2, /// requests - number of read I/Os merged with in-queue I/O
 
 
     /// These values count the number of milliseconds that I/O requests have
@@ -3009,19 +3147,19 @@ enum {
     /// these values will increase at a rate greater than 1000/second; for
     /// example, if 60 read requests wait for an average of 30 ms, the read_ticks
     /// field will increase by 60*30 = 1800.
-            READ_TICKS, ///milliseconds - total wait time for read requests
+            READ_TICKS      = 3, ///milliseconds - total wait time for read requests
 
     /// These values increment when an I/O request completes.
-            WRITE_IO, /// requests - number of write I/Os processed
+            WRITE_IO        = 4, /// requests - number of write I/Os processed
 
     /// These values increment when an I/O request is merged with an already-queued I/O request.
-            WRITE_MERGES, /// requests - number of write I/Os merged with in-queue I/O
+            WRITE_MERGES    = 5, /// requests - number of write I/Os merged with in-queue I/O
 
     /// These values count the number of sectors read from or written to this block device.
     /// The "sectors" in question are the standard UNIX 512-byte sectors, not any device- or
     /// filesystem-specific block size.
     /// The counters are incremented when the I/O completes.
-            WRITE_SECTORS, /// sectors - number of sectors written
+            WRITE_SECTORS   = 6, /// sectors - number of sectors written
 
 
     /// These values count the number of milliseconds that I/O requests have
@@ -3029,22 +3167,22 @@ enum {
     /// these values will increase at a rate greater than 1000/second; for
     /// example, if 60 read requests wait for an average of 30 ms, the read_ticks
     /// field will increase by 60*30 = 1800.
-            WRITE_TICKS, /// milliseconds - total wait time for write requests
+            WRITE_TICKS     = 7, /// milliseconds - total wait time for write requests
 
     /// This value counts the number of I/O requests that have been issued to
     /// the device driver but have not yet completed.  It does not include I/O
     /// requests that are in the queue but not yet issued to the device driver.
-            IN_FLIGHT, /// requests - number of I/Os currently in flight
+            IN_FLIGHT       = 8, /// requests - number of I/Os currently in flight
 
     /// This value counts the number of milliseconds during which the device has
     /// had I/O requests queued.
-            IO_TICKS, /// milliseconds - total time this block device has been active
+            IO_TICKS        = 9, /// milliseconds - total time this block device has been active
 
     /// This value counts the number of milliseconds that I/O requests have waited
     /// on this block device.  If there are multiple I/O requests waiting, this
     /// value will increase as the product of the number of milliseconds times the
     /// number of requests waiting (see "read ticks" above for an example).
-            TIME_IN_QUEUE /// milliseconds - total wait time for all requests
+            TIME_IN_QUEUE   = 10 /// milliseconds - total wait time for all requests
 };
 
 
@@ -3056,7 +3194,7 @@ static size_t get_sfile_size(const char *filename) {
 
 typedef void(*cmd_exec_cb)(void *, list_t *);
 
-static void sfile_mmap(const char *filename, string *s) {
+static void file_mmap_string(const char *filename, string *s) {
     size_t filesize = get_sfile_size(filename);
     //Open file
     int fd = open(filename, O_RDONLY, 0);
@@ -3096,6 +3234,216 @@ static void fd_file_mmap(int fd, string *s) {
     close(fd);
 }
 
+
+static void file_read_all(const char* filename, char** buff, size_t* size)
+{
+    FILE *f = fopen(filename, "rb");
+    fseek(f, 0, SEEK_END);
+    size_t fsize = (size_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char *string = malloc(fsize);
+    fread(string, fsize, 1, f);
+    fclose(f);
+
+    *buff = string;
+    *size = fsize;
+}
+
+static void file_read_all_s(const char* filename, string* s)
+{
+    FILE *f = fopen(filename, "rb");
+    fseek(f, 0, SEEK_END);
+    size_t fsize = (size_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    da_realloc(_da(s), fsize);
+    fread(_da(s)->ptr, fsize, 1, f);
+    _da(s)->used = fsize;
+    fclose(f);
+}
+
+enum {
+    HR_SIZE_KB,
+    HR_SIZE_MB,
+    HR_SIZE_GB
+};
+
+
+
+void human_readable_size(uint64_t bytes, double* result, int * type) {
+
+    double r = bytes / 1024.;
+    if (r < 1024)  // KB / sec
+    {
+        *result = r;
+        *type = HR_SIZE_KB;
+        return;
+    }
+
+    r = bytes / 1024 / 1024;
+    if (r < 1024)  // MiB / sec
+    {
+        *result = r;
+        *type = HR_SIZE_MB;
+        return;
+    }
+
+    r = bytes / 1024 / 1024 / 1024;
+    {
+        *result = r;
+        *type = HR_SIZE_GB;
+        return;
+    }
+}
+
+//===============================================================================
+// DEVICE MANAGMENT
+//===============================================================================
+
+typedef struct device {
+    string *name;
+    //struct statvfs stats;
+    uint64_t stat[11];
+    string *perf_read;
+    string *perf_write;
+    string *label;
+    uint64_t size;
+    uint64_t used;
+    uint64_t avail;
+    uint64_t use;
+    double perc;
+    string *fs;
+    string *mount;
+    string *sysfolder;
+    string *model;
+    string* uuid;
+} device_t;
+
+static void device_release_cb(void* p)
+{
+    device_t* dev = (device_t*)p;
+
+    if(dev->name) string_release(dev->name);
+    if(dev->perf_read) string_release(dev->perf_read);
+    if(dev->perf_write) string_release(dev->perf_write);
+    if(dev->label) string_release(dev->label);
+    if(dev->fs) string_release(dev->fs);
+    if(dev->mount) string_release(dev->mount);
+    if(dev->sysfolder) string_release(dev->sysfolder);
+    if(dev->model) string_release(dev->model);
+    if(dev->uuid) string_release(dev->uuid);
+
+    free(dev);
+}
+
+static device_t* device_list_search(list_t* devs, string* name)
+{
+    list_iter_t* it = NULL;
+    list_iter_init(devs, &it);
+
+    device_t* dev;
+    while((dev = list_iter_next(it))) {
+        string *dev_devname = NULL;
+        string_create(&dev_devname, "/dev/");
+        string_add(dev_devname, dev->name);
+
+        ret_f_t res = return_map(string_compare(dev_devname, name));
+
+        string_release(dev_devname);
+
+
+        if(res.code == ST_OK && res.data == 0)
+        {
+            break;
+        }
+    }
+
+
+    list_iter_release(it);
+
+    return dev;
+}
+
+static device_t* device_list_direct_search(list_t* devs, string* name)
+{
+    list_iter_t* it = NULL;
+    list_iter_init(devs, &it);
+
+    device_t* dev;
+    while((dev = list_iter_next(it))) {
+
+
+        ret_f_t res = return_map(string_compare(dev->name, name));
+        if(res.code == ST_OK && res.data == 0)
+        {
+            break;
+        }
+    }
+
+
+    list_iter_release(it);
+
+    return dev;
+}
+
+static void device_diff(device_t* a, device_t* b, double sample_size) {
+    static const uint64_t BLOCK_SIZE = 512; // Unix block size
+
+    b->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
+    b->stat[READ_SECTORS] = b->stat[READ_SECTORS] - a->stat[READ_SECTORS];
+
+    double hr_size = 0.0;
+    int size_type = -1;
+    human_readable_size(b->stat[READ_SECTORS] * BLOCK_SIZE, &hr_size, &size_type);
+
+    hr_size /= sample_size;
+
+    string* speed = NULL;
+    string_init(&speed);
+    switch (size_type)
+    {
+        case HR_SIZE_KB:
+            string_appendf(speed, "%lf Kb/sec", hr_size);
+            break;
+        case HR_SIZE_MB:
+            string_appendf(speed, "%lf Mb/sec", hr_size);
+            break;
+        case HR_SIZE_GB:
+            string_appendf(speed, "%lf Gb/sec", hr_size);
+            break;
+        default:
+            break;
+    }
+
+    if(b->perf_read) string_release(b->perf_read);
+    b->perf_read = speed;
+
+
+    human_readable_size(b->stat[WRITE_SECTORS] * BLOCK_SIZE, &hr_size, &size_type);
+
+    hr_size /= sample_size;
+
+    string_init(&speed);
+    switch (size_type)
+    {
+        case HR_SIZE_KB:
+            string_appendf(speed, "%lf Kb/sec", hr_size);
+            break;
+        case HR_SIZE_MB:
+            string_appendf(speed, "%lf Mb/sec", hr_size);
+            break;
+        case HR_SIZE_GB:
+            string_appendf(speed, "%lf Gb/sec", hr_size);
+            break;
+        default:
+            break;
+    }
+
+    if(b->perf_write) string_release(b->perf_write);
+    b->perf_write = speed;
+}
+
 static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     FILE *fpipe;
 
@@ -3124,10 +3472,11 @@ static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
 
 
 enum {
-    DFS_TOTAL = 0,
-    DFS_USED = 1,
-    DFS_AVAIL = 2,
-    DFS_USE = 3
+    DFS_NAME = 0,
+    DFS_TOTAL = 1,
+    DFS_USED = 2,
+    DFS_AVAIL = 3,
+    DFS_USE = 4
 
 };
 
@@ -3144,14 +3493,14 @@ typedef struct df_stat {
 } df_stat_t;
 
 typedef struct {
-    hashtable_t *stats;
+    list_t* devs;
     uint64_t skip_first;
 } df_t;
 
 
-static void df_init(df_t **df) {
+static void df_init(list_t* devs, df_t **df) {
     *df = zalloc(sizeof(df_t));
-    (*df)->stats = zalloc(sizeof(hashtable_t));
+    (*df)->devs = devs;
     (*df)->skip_first = 1;
 }
 
@@ -3181,11 +3530,12 @@ static void df_callback(void *ctx, list_t *lines) {
     list_iter_init(lines, &line_it);
     while ((tk = slist_next(line_it)) != NULL) {
 
-        if (string_starts_with(tk, "/dev/") != ST_OK)
-            continue;
-
         fprintf(stdout, "------- TOKEN LINE-----------\n");
         string_print(tk);
+
+
+        if (!string_re_match(tk, ".*(sd.*).*"))
+            continue;
 
         fprintf(stdout, "------- TOKEN SPLIT-----------\n");
 
@@ -3197,39 +3547,39 @@ static void df_callback(void *ctx, list_t *lines) {
 
         list_iter_t* tk_it = NULL;
         list_iter_init(tokens, &tk_it);
-        //==============================
-        // init df_stat
 
-        df_stat_t *stat = zalloc(sizeof(df_stat_t));
-
-
-        //==============================
 
 
         string *s = NULL;
-        string *sname = NULL;
         uint64_t k = 0;
+        device_t* dev = NULL;
         while ((s = slist_next(tk_it)) != NULL) {
 
             string_strip(s);
 
+            if(k == DFS_NAME)
+            {
+                dev = device_list_search(df->devs, s);
+                if(dev == NULL)
+                    break;
+            }
+
             switch (k) {
-                case 0:
-                    string_dub(s, &sname);
-                    string_dub(s, &stat->dev);
+                case DFS_TOTAL:
+                    string_to_u64(s, &dev->size);
                     break;
-                case 1:
-                    string_to_u64(s, &stat->total);
+                case DFS_USED: {
+                    string_to_u64(s, &dev->used);
+                    if(dev->size)
+                        dev->perc = dev->used / (double) dev->size * 100.0;
                     break;
-                case 2:
-                    string_to_u64(s, &stat->used);
+                }
+                case DFS_AVAIL:
+                    string_to_u64(s, &dev->avail);
                     break;
-                case 3:
-                    string_to_u64(s, &stat->avail);
-                    break;
-                case 4: {
+                case DFS_USE: {
                     string_pop_head(s, 1);
-                    string_to_u64(s, &stat->use);
+                    string_to_u64(s, &dev->use);
                     break;
                 }
 
@@ -3241,27 +3591,20 @@ static void df_callback(void *ctx, list_t *lines) {
 
         }
 
-
-        //add to ht, not need to free
-        ht_set_df(df->stats, sname, stat);
-
-        string_release(sname);
-
+        list_iter_release(tk_it);
         list_release(tokens, true);
 
     }
+
+
+    list_release(lines, true);
 
 
 }
 
 static void df_execute(df_t *dfs) {
 
-    string *s;
-    string_create(&s, "df --block-size=1");
-
-    char *cmd = NULL;
-    char *cmd_end;
-    string_map_string(s, &cmd, &cmd_end);
+    const char *cmd = "df --block-size=1";
     cmd_execute(cmd, dfs, &df_callback);
 }
 
@@ -3279,7 +3622,7 @@ enum {
 };
 
 typedef struct sblkid {
-    hashtable_t *blk;
+    list_t* devs;
 } sblkid_t;
 
 typedef struct {
@@ -3343,70 +3686,24 @@ static ret_t ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
     return ST_OK;
 }
 
-#define MAX_ERROR_MSG 0x1000
+typedef struct string_string_pair
+{
+    string* key;
+    string* val;
+} ss_kv_t;
 
-/* Compile the regular expression described by "regex_text" into
-   "r". */
 
-static ret_t compile_regex(regex_t *r, const char *regex_text) {
-    int status = regcomp(r, regex_text, REG_EXTENDED | REG_NEWLINE);
-    if (status != 0) {
-        char error_message[MAX_ERROR_MSG];
-        regerror(status, r, error_message, MAX_ERROR_MSG);
-        fprintf(stderr, "Regex error compiling '%s': %s\n",
-                regex_text, error_message);
-        return 1;
-    }
-    return 0;
+static void ss_kv_release_cb(void* p)
+{
+    ss_kv_t* kv = (ss_kv_t*)p;
+    string_release(kv->key);
+    string_release(kv->val);
+    free(kv);
 }
-
-/*
-  Match the string in "to_match" against the compiled regular
-  expression in "r".
- */
-
-static ret_t match_regex(regex_t *r, const char *to_match) {
-    /* "P" is a pointer into the string which points to the end of the
-       previous match. */
-    const char *p = to_match;
-    /* "N_matches" is the maximum number of matches allowed. */
-    const int n_matches = 10;
-    /* "M" contains the matches found. */
-    regmatch_t m[n_matches];
-
-    while (1) {
-        int i = 0;
-        int nomatch = regexec(r, p, n_matches, m, 0);
-        if (nomatch) {
-            printf("No more matches.\n");
-            return nomatch;
-        }
-        for (i = 0; i < n_matches; i++) {
-            int start;
-            int finish;
-            if (m[i].rm_so == -1) {
-                break;
-            }
-            start = (int) (m[i].rm_so + (p - to_match));
-            finish = (int) (m[i].rm_eo + (p - to_match));
-            if (i == 0) {
-                printf("$& is ");
-            } else {
-                printf("$%d is ", i);
-            }
-            printf("'%.*s' (bytes %d:%d)\n", (finish - start),
-                   to_match + start, start, finish);
-        }
-        p += m[0].rm_eo;
-    }
-    return 0;
-}
-
 
 static void sblk_callback(void *ctx, list_t *lines) {
 
     sblkid_t *sys = (sblkid_t *) ctx;
-    ht_init(&sys->blk);
 
     {
         string *tk = NULL;
@@ -3414,25 +3711,136 @@ static void sblk_callback(void *ctx, list_t *lines) {
         list_iter_init(lines, &ln_it);
         while ((tk = slist_next(ln_it)) != NULL) {
 
-            fprintf(stdout, "------- TOKEN LINE-----------\n");
+            LOG_INFO("------- TOKEN LINE-----------");
             string_print(tk);
 
 
             //================================
             regex_t re;
-            compile_regex(&re, "(\\w+)=\"([[:alnum:][:space:]-]*)\"");
+            regex_compile(&re, "(\\w+)=\"([[:alnum:][:space:]-]*)\"");
 
             char *tkp = NULL;
             string_create_nt(tk, &tkp);
 
-            match_regex(&re, tkp);
+            device_t* dev = NULL;
+            list_t* pairs = NULL;
+            list_init(&pairs, &ss_kv_release_cb);
 
+            const char *p = tkp;
+            /* "N_matches" is the maximum number of matches allowed. */
+            const int n_matches = 5;
+            /* "M" contains the matches found. */
+            regmatch_t m[n_matches];
+            while (1) {
+                int nomatch = regexec(&re, p, n_matches, m, 0);
+                if (nomatch) {
+                    LOG_INFO("No more matches.");
+                    break;
+                }
+
+                ss_kv_t* ss_kv = zalloc(sizeof(ss_kv_t));
+                for (int i = 0; i < n_matches; i++) {
+                    int start;
+                    int finish;
+                    if (m[i].rm_so == -1) {
+                        break;
+                    }
+
+                    string* key = NULL;
+                    string* val = NULL;
+
+                    start = (int) (m[i].rm_so + (p - tkp));
+                    finish = (int) (m[i].rm_eo + (p - tkp));
+                    if (i == 0) {
+                        printf("$& is ");
+                        continue;
+                    }
+                    if(i == 1)
+                    {
+                        printf("$%d is ", i);
+
+                        printf("'%.*s' (bytes %d:%d)\n", (finish - start),
+                               tkp + start, start, finish);
+
+                        //TODO leak
+                        string_init(&key);
+                        string_appendn(key, tkp+start, (finish - start));
+                        ss_kv->key = key;
+
+                    } else if(i == 2)
+                    {
+                        printf("$%d is ", i);
+
+                        printf("'%.*s' (bytes %d:%d)\n", (finish - start),
+                               tkp + start, start, finish);
+
+                        if(finish-start != 0) {
+
+                            string_init(&val);
+                            string_appendn(val, tkp + start, (finish - start));
+                            ss_kv->val = val;
+
+                            list_push(pairs, ss_kv);
+                        }
+                        else
+                        {
+                            string_release(key);
+                            free(ss_kv);
+                        }
+                    }
+
+
+                }
+                p += m[0].rm_eo;
+            }
+
+            regfree(&re);
             free(tkp);
+
+
+            //================================
+            list_iter_t* kv_it = NULL;
+            list_iter_init(pairs, &kv_it);
+
+            ss_kv_t* kv;
+            while((kv = list_iter_next(kv_it))) {
+
+
+                string_printd(kv->key);
+                string_printd(kv->val);
+
+                if (string_comparez(kv->key, "NAME") == RET_OK) {
+                    dev = device_list_direct_search(sys->devs, kv->val);
+                } else if (string_comparez(kv->key, "FSTYPE") == RET_OK) {
+                    if (dev)
+                        string_dub(kv->val, &dev->fs);
+                } else if (string_comparez(kv->key, "MODEL") == RET_OK) {
+                    if (dev) {
+                        string_strip(kv->val);
+                        string_dub(kv->val, &dev->model);
+                    }
+                } else if (string_comparez(kv->key, "MOUNTPOINT") == RET_OK) {
+                    if (dev)
+                        string_dub(kv->val, &dev->mount);
+                } else if (string_comparez(kv->key, "UUID") == RET_OK) {
+                    if (dev)
+                        string_dub(kv->val, &dev->uuid);
+                } else if (string_comparez(kv->key, "LABEL") == RET_OK) {
+                    if (dev)
+                        string_dub(kv->val, &dev->label);
+                }
+            }
+
+            list_iter_release(kv_it);
+            list_release(pairs, true);
 
             //================================
         }
     }
 
+    list_release(lines, true);
+
+    /**
     return;
 
     fprintf(stdout, "------- LINES OF TOKENS -----------\n");
@@ -3510,6 +3918,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
         list_release(tokens, true); tokens = NULL;
 
     }
+    **/
 
 }
 
@@ -3530,140 +3939,101 @@ static ret_t sblk_execute(sblkid_t *sblk) {
     string_append(cmd, "");
 
 
-    char *ccmd = NULL;
-    char *cmd_end = NULL;
-    string_map_string(cmd, &ccmd, &cmd_end);
+    char *ccmd = string_makez(cmd);
     cmd_execute(ccmd, sblk, &sblk_callback);
 
+    string_release(cmd);
+    free(ccmd);
     return ST_OK;
 }
 
 
-typedef struct device {
-    string *name;
-    //struct statvfs stats;
-    //std::vector <uint64_t> stat;
-    string *perf_read;
-    string *perf_write;
-    string *label;
-    uint64_t size;
-    uint64_t used;
-    uint64_t avail;
-    double perc;
-    string *fsize;
-    string *fuse;
-    string *fs;
-    string *mount;
-    string *sysfolder;
-    string *model;
-    uint64_t child;
-    vector_t childs;
-} device_t;
+static void scan_dir_dev(string* basedir, list_t* devs) {
+    struct dirent *dir = NULL;
 
-//static ret_t read_all_file(const char* path) {
-//    FILE* f;
-//
-//    if(!(f = fopen(path, "r"))
-//        return ST_ERR;
-//
-//
-//
-//
-//    fclose(f);
-//
-//    return ST_OK;
-//}
-//
-//static std::vector<std::string> scan_dir(std::string basedir, std::regex re) {
-//    dirent *dir = nullptr;
-//    DIR *d = opendir(basedir.c_str());
-//
-//    std::vector<std::string> v;
-//    if (d) {
-//        while ((dir = readdir(d)) != NULL) {
-//            if (std::regex_match(dir->d_name, re)) {
-//                std::stringstream ss;
-//                ss << basedir << "/" << std::string(dir->d_name);
-//                v.push_back(ss.str());
-//            }
-//        }
-//
-//        closedir(d);
-//    }
-//
-//    return v;
-//}
+    char* dir_c = string_makez(basedir);
+    DIR *d = opendir(dir_c);
+    free(dir_c);
+
+    if (d) {
+        while ((dir = readdir(d)) != NULL) {
+
+            string* dir_name = NULL;
+            string_create(&dir_name, dir->d_name);
+
+            bool match = string_re_match(dir_name, "sd.*");
+
+            if (match) {
+
+                device_t* dev = zalloc(sizeof(device_t));
+
+                // create sysdir
+                string* sysdir = NULL;
+                string_init(&sysdir);
+                string_add(sysdir, basedir);
+                string_add(sysdir, dir_name);
+                string_append(sysdir, "/");
+
+                // set name and sysdir
+                string_dub(dir_name, &dev->name);
+                dev->sysfolder = sysdir;
+
+                // getting stat
+                string* stat_s = NULL;
+                string_init(&stat_s);
+
+                string* stat_filename = NULL;
+                string_dub(sysdir, &stat_filename);
+                string_append(stat_filename, "stat");
+
+                char* stat_filename_c = string_makez(stat_filename);
+                file_read_all_s(stat_filename_c, stat_s);
+                string_strip(stat_s);
+
+                free(stat_filename_c);
+                string_release(stat_filename);
+
+                list_t* lstat_s = NULL;
+                string_split(stat_s, ' ', &lstat_s);
+
+                string_release(stat_s);
+
+                list_iter_t* lstat_it = NULL;
+                list_iter_init(lstat_s, &lstat_it);
 
 
+                string* s;
+                size_t stat_n = 0;
+                while((s = (string*)list_iter_next(lstat_it)))
+                    string_to_u64(s, &dev->stat[stat_n++]);
 
-//std::string hr_size(uint64_t bytes) {
-//
-//    double r = bytes / 1024.;
-//    if (r < 1024)  // KB / sec
-//        return tostring((uint64_t) r) + "Kb";
-//
-//    r = bytes / 1024 / 1024;
-//    if (r < 1024)  // MiB / sec
-//        return tostring((uint64_t) r) + "Mb";
-//
-//    r = bytes / 1024 / 1024 / 1024;
-//    return tostring((uint64_t) r) + "Gb";
-//}
 
-//
-//class DeviceManager {
-//    std::vector<device_ptr> base_devs;
-//public:
-//    void detect() {
-//        std::regex re1("^s.*$");
-//        auto vdev = scan_dir("/sys/block", re1);
-//
-//        base_devs.resize(vdev.size());
-//
-//        for (auto &dev : base_devs)
-//            dev = std::make_shared<Device>();
-//
-//        for (size_t i = 0; i < vdev.size(); ++i) {
-//            auto pos = vdev[i].find_last_of('/');
-//            auto devn = vdev[i].substr(pos + 1);
-//
-//
-//            base_devs[i]->sysfolder = vdev[i];
-//            base_devs[i]->name = devn;
-//            base_devs[i]->child = false;
-//
-//            auto childsv = scan_dir(base_devs[i]->sysfolder, std::regex(base_devs[i]->name + "[1-9]+$"));
-//
-//            for (size_t j = 0; j < childsv.size(); ++j) {
-//                device_ptr child = std::make_shared<Device>();
-//                child->sysfolder = childsv[j];
-//                auto cpos = childsv[j].find_last_of('/');
-//                auto cdevn = childsv[j].substr(cpos + 1);
-//                child->name = cdevn;
-//                child->child = true;
-//
-//                base_devs[i]->childs.push_back(child);
-//            }
-//
-//
-//        }
-//    }
-//
-//    void enrich_devs() {
-//        for (auto dev : base_devs) {
-//            for (auto cdev : dev->childs) {
-//                enrich(cdev);
-//            }
-//
-//            enrich(dev);
-//
-//
-//        }
-//    }
-//
-//    std::vector<device_ptr> devs() {
-//        return base_devs;
-//    }
+
+                list_iter_release(lstat_it);
+                list_release(lstat_s, true);
+
+
+                // add dev to list
+                list_push(devs, dev);
+
+                string* subdir = NULL;
+                string_dub(sysdir, &subdir);
+
+                // recursive iterate
+                scan_dir_dev(subdir, devs);
+
+                string_release(subdir);
+            }
+
+            string_release(dir_name);
+        }
+
+        closedir(d);
+    }
+}
+
+
+
 //
 //private:
 //
@@ -4042,7 +4412,7 @@ void scan_blk(uint64_t hash, ht_key_t *key, ht_value_t *val) {
     for (size_t i = 0; i < sz; ++i) {
         skey_value_t *kv = NULL;
         vector_get(vec, i, (void **) &kv);
-        fprintf(stderr, "[scan_blk][0x%08lx] %.*s=%.*s\n", hash, (int) string_size(kv->key), string_cdata(kv->key),
+        LOG_INFO("[0x%08lx] %.*s=%.*s\n", hash, (int) string_size(kv->key), string_cdata(kv->key),
                 (int) string_size(kv->value), string_cdata(kv->value));
     }
 
@@ -4063,7 +4433,7 @@ void scan_df(uint64_t hash, ht_key_t *key, ht_value_t *val) {
     key->u.i = hash;
 }
 
-void check_style_defines() {
+static void check_style_defines() {
 #ifdef _POSIX_SOURCE
     printf("_POSIX_SOURCE defined\n");
 #endif
@@ -4125,6 +4495,151 @@ void check_style_defines() {
 #endif
 }
 
+static void devices_get(list_t** devs)
+{
+    string* basedir = NULL;
+
+    list_init(devs, &device_release_cb);
+
+    string_create(&basedir, "/sys/block/" );
+
+    scan_dir_dev(basedir, *devs);
+
+    df_t* df;
+    df_init(*devs, &df);
+    df_execute(df);
+
+    sblkid_t blk;
+    blk.devs = *devs;
+    sblk_execute(&blk);
+
+    list_iter_t* list_it = NULL;
+    list_iter_init(*devs, &list_it);
+
+    device_t* dev;
+    while((dev = (device_t*)list_iter_next(list_it)))
+    {
+        char* name = string_makez(dev->name);
+        char* syspath = string_makez(dev->sysfolder);
+        char* fs = string_makez(dev->fs);
+        char* model = string_makez(dev->model);
+        char* mount = string_makez(dev->mount);
+        char* uuid = string_makez(dev->uuid);
+        char* label = string_makez(dev->label);
+        LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
+                          "[mount=%s][uuid=%s][label=%s]\n",
+                  (void*)dev, name, syspath,
+                  dev->size, dev->used, dev->avail, dev->use, dev->perc,
+                  fs, model, mount, uuid, label
+
+        );
+
+        free(label);
+        free(uuid);
+        free(mount);
+        free(model);
+        free(fs);
+        free(syspath);
+        free(name);
+    }
+
+    list_iter_release(list_it);
+}
+
+
+typedef void(*sampled_device_cb)(list_t*);
+
+static void devices_sample(double sample_size_sec, sampled_device_cb cb)
+{
+    list_t* devs_a = NULL;
+    list_t* devs_b = NULL;
+
+    devices_get(&devs_a);
+
+    __useconds_t ustime = (__useconds_t)(sample_size_sec * 1000000.0);
+    usleep(ustime);
+
+
+    devices_get(&devs_b);
+
+
+    list_iter_t* it = NULL;
+    list_iter_init(devs_a, &it);
+
+    device_t* dev_a;
+    device_t* dev_b;
+    while((dev_a = list_iter_next(it)))
+    {
+        list_iter_t* it2 = NULL;
+        list_iter_init(devs_b, &it2);
+
+        while((dev_b = list_iter_next(it2)))
+        {
+            ret_f_t cmp = return_map(string_compare(dev_a->name, dev_b->name));
+            if(cmp.code == ST_OK && cmp.data == 0)
+            {
+                device_diff(dev_a, dev_b, sample_size_sec);
+                break;
+            }
+
+        }
+
+        list_iter_release(it2);
+    }
+
+    list_iter_release(it);
+
+    list_release(devs_a, true);
+
+    cb(devs_b);
+
+    list_release(devs_b, true);
+
+}
+
+
+void test_sampled_device(list_t* devs)
+{
+    list_iter_t* list_it = NULL;
+    list_iter_init(devs, &list_it);
+
+    LOG_DEBUG("============SAMPLED DEVICES=============");
+
+    device_t* dev;
+    while((dev = (device_t*)list_iter_next(list_it)))
+    {
+        char* name = string_makez(dev->name);
+        char* syspath = string_makez(dev->sysfolder);
+        char* fs = string_makez(dev->fs);
+        char* model = string_makez(dev->model);
+        char* mount = string_makez(dev->mount);
+        char* uuid = string_makez(dev->uuid);
+        char* label = string_makez(dev->label);
+        char* read  = string_makez(dev->perf_read);
+        char* write = string_makez(dev->perf_write);
+        LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
+                          "[mount=%s][uuid=%s][label=%s][read=%s][write=%s]\n",
+                  (void*)dev, name, syspath,
+                  dev->size, dev->used, dev->avail, dev->use, dev->perc,
+                  fs, model, mount, uuid, label,
+                  read, write
+
+        );
+
+        free(write);
+        free(read);
+        free(label);
+        free(uuid);
+        free(mount);
+        free(model);
+        free(fs);
+        free(syspath);
+        free(name);
+    }
+
+    list_iter_release(list_it);
+}
+
 //=======================================================================================
 // MAIN
 //=======================================================================================
@@ -4136,49 +4651,7 @@ int main() {
 
     tests_run();
 
-//
-//    struct A* a = OBJECT_CREATE(struct A);
-//    OBJECT_INIT(a);
-//
-//
-//    a->ch = '\n';
-//    a->i = 210490;
-//    a->str = "Hello, World";
-//
-//    {
-//        struct A *b = OBJECT_SHARE(a, struct A);
-//        b->ch = 0;
-//    }
-//
-//    OBJECT_RELEASE(a, struct A);
-//
-
-
-//    for(;;) {
-//        test_slist();
-//        usleep(1);
-//
-//    }
-
-
-
-
-//    df_t* df;
-//    df_init(&df);
-//    df_execute(df);
-//    ht_foreach(df->stats, &scan_df);
-
-
-
-//    sblkid_t blk;
-//    sblk_execute(&blk);
-//
-//    ht_foreach(blk.blk, &scan_blk);
-
-
-    //ht_foreach(alloc_table, &scan_alloc);
-
-    //fprintf(stderr, "Total leaked: %lu bytes\n", total_leak);
+    devices_sample(1.0, &test_sampled_device);
 
     globals_shutdown();
 
