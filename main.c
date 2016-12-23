@@ -48,7 +48,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define HW_VERSION_MAJOR 0
 #define HW_VERSION_MINOR_A 0
-#define HW_VERSION_MINOR_B 2
+#define HW_VERSION_MINOR_B 3
+
+
 #define STRING_INIT_BUFFER 4
 #define ALLOC_ALIGN 16
 
@@ -3199,6 +3201,20 @@ static void file_read_all_s(const char *filename, string *s) {
     fclose(f);
 }
 
+static void file_read_line(const char *filename, string *s) {
+    FILE *f = fopen(filename, "rb");
+
+
+    char *buff = NULL;
+    size_t size = 0;
+    getline(&buff, &size, f);
+
+    string_append(s, buff);
+
+    fclose(f);
+}
+
+
 enum {
     HR_SIZE_KB,
     HR_SIZE_MB,
@@ -3931,41 +3947,37 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
 // NET DEVICE
 //===============================================================================
 
-typedef struct net_dev
-{
-    string*  name;
-    string*  sysdir;
+typedef struct net_dev {
+    string *name;
+    string *sysdir;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
-    string*  tx_speed;
-    string*  rx_speed;
-    string*  speed;
-    string*  mtu;
+    string *tx_speed;
+    string *rx_speed;
+    string *speed;
+    string *mtu;
     double bandwidth_use;
 } net_dev_t;
 
 
-static void net_dev_release_cb(void* p)
-{
-    net_dev_t* dev = (net_dev_t*)p;
-    if(dev)
-    {
-        if(dev->name) string_release(dev->name);
-        if(dev->sysdir) string_release(dev->sysdir);
-        if(dev->tx_speed) string_release(dev->tx_speed);
-        if(dev->rx_speed) string_release(dev->rx_speed);
-        if(dev->mtu) string_release(dev->mtu);
-        if(dev->speed) string_release(dev->speed);
+static void net_dev_release_cb(void *p) {
+    net_dev_t *dev = (net_dev_t *) p;
+    if (dev) {
+        if (dev->name) string_release(dev->name);
+        if (dev->sysdir) string_release(dev->sysdir);
+        if (dev->tx_speed) string_release(dev->tx_speed);
+        if (dev->rx_speed) string_release(dev->rx_speed);
+        if (dev->mtu) string_release(dev->mtu);
+        if (dev->speed) string_release(dev->speed);
         free(dev);
     }
 }
 
-static inline string* file_read_subdir(string* subdir, const char* filepath)
-{
-    string* data = NULL;
+static inline string *file_read_subdir(string *subdir, const char *filepath) {
+    string *data = NULL;
     string_init(&data);
 
-    string* filename = NULL;
+    string *filename = NULL;
     string_dub(subdir, &filename);
     string_append(filename, filepath);
 
@@ -3987,10 +3999,10 @@ static void net_dev_scan(list_t *devs) {
     if (d) {
         while ((dir = readdir(d))) {
 
-            if(strcmp(dir->d_name, ".") == 0)
+            if (strcmp(dir->d_name, ".") == 0)
                 continue;
 
-            if(strcmp(dir->d_name, "..") == 0)
+            if (strcmp(dir->d_name, "..") == 0)
                 continue;
 
             string *dir_name = NULL;
@@ -4007,14 +4019,14 @@ static void net_dev_scan(list_t *devs) {
 
             // set name and sysdir
             string_dub(dir_name, &dev->name);
-            dev->sysdir= sysdir;
+            dev->sysdir = sysdir;
 
             // getting stats
 
             dev->mtu = file_read_subdir(sysdir, "mtu");
             dev->speed = file_read_subdir(sysdir, "speed");
-            string* rx_bytes_s = file_read_subdir(sysdir, "statistics/rx_bytes");
-            string* tx_bytes_s = file_read_subdir(sysdir, "statistics/tx_bytes");
+            string *rx_bytes_s = file_read_subdir(sysdir, "statistics/rx_bytes");
+            string *tx_bytes_s = file_read_subdir(sysdir, "statistics/tx_bytes");
 
             string_to_u64(rx_bytes_s, &dev->rx_bytes);
             string_to_u64(tx_bytes_s, &dev->tx_bytes);
@@ -4033,8 +4045,7 @@ static void net_dev_scan(list_t *devs) {
 }
 
 
-static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate)
-{
+static void net_dev_diff(net_dev_t *a, net_dev_t *b, double sample_rate) {
     uint64_t drx = b->rx_bytes - a->rx_bytes;
     uint64_t dtx = b->tx_bytes - a->tx_bytes;
 
@@ -4043,15 +4054,15 @@ static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate)
     ispeed /= 8; // to megabytes
     ispeed *= 1024 * 1024; // to bytes
 
-    if(!ispeed)
+    if (!ispeed)
         string_append(b->speed, "0 Mbits");
     else
         string_append(b->speed, " Mbits");
 
-    double pure_rxtx = (double)(drx + dtx)/sample_rate;
-    b->bandwidth_use = pure_rxtx/(double)ispeed;
+    double pure_rxtx = (double) (drx + dtx) / sample_rate;
+    b->bandwidth_use = pure_rxtx / (double) ispeed;
 
-    if(isnan(b->bandwidth_use))
+    if (isnan(b->bandwidth_use))
         b->bandwidth_use = 0.0;
 
     double hr_size = 0.0;
@@ -4103,6 +4114,104 @@ static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate)
     b->tx_speed = speed;
 }
 
+//===============================================================================
+// CPU DEVICE
+//===============================================================================
+
+typedef struct cpu_dev {
+    uint64_t user;
+    uint64_t nice;
+    uint64_t system;
+    uint64_t idle;
+    uint64_t iowait;
+    uint64_t irc;
+    uint64_t softirc;
+    uint64_t steal;
+    uint64_t guest;
+    uint64_t guest_nice;
+} cpu_dev_t;
+
+static void cpu_dev_release_cb(void *p) {
+    free(p);
+}
+
+static void cpu_dev_get(cpu_dev_t **cpu_dev) {
+    *cpu_dev = zalloc(sizeof(cpu_dev_t));
+    cpu_dev_t *cpu = *cpu_dev;
+    string *stat_s = NULL;
+    string_init(&stat_s);
+
+    file_read_line("/proc/stat", stat_s);
+    string_strip(stat_s);
+
+    list_t *cpu_stats = NULL;
+    string_split(stat_s, ' ', &cpu_stats);
+
+    list_iter_t *stat_it = NULL;
+    list_iter_init(cpu_stats, &stat_it);
+    list_iter_next(stat_it);
+
+    string *stat = NULL;
+    uint64_t istats[10];
+    uint64_t idx = 0;
+    while ((stat = list_iter_next(stat_it))) {
+        string_to_u64(stat, &istats[idx++]);
+    }
+
+
+    cpu->user = istats[0];
+    cpu->nice = istats[1];
+    cpu->system = istats[2];
+    cpu->idle = istats[3];
+    cpu->iowait = istats[4];
+    cpu->irc = istats[5];
+    cpu->softirc = istats[6];
+    cpu->steal = istats[7];
+    cpu->guest = istats[8];
+    cpu->guest_nice = istats[9];
+
+    list_iter_release(stat_it);
+    list_release(cpu_stats, true);
+}
+
+
+static void cpu_dev_diff(cpu_dev_t *a, cpu_dev_t *b) {
+    b->user = b->user - a->user;
+    b->nice = b->nice - a->nice;
+    b->system = b->system - a->system;
+    b->idle = b->idle - a->idle;
+    b->iowait = b->iowait - a->iowait;
+    b->irc = b->irc - a->irc;
+    b->softirc = b->softirc - a->softirc;
+    b->steal = b->steal - a->steal;
+    b->guest = b->guest - a->guest;
+    b->guest_nice = b->guest_nice - a->guest_nice;
+
+}
+
+static double cpu_dev_diff_usage(cpu_dev_t *a, cpu_dev_t *b) {
+
+    uint64_t prev_idle = a->idle + a->iowait;
+    uint64_t idle = b->idle + b->iowait;
+
+    uint64_t prev_non_idle = a->user + a->nice + a->system + a->irc + a->softirc + a->steal;
+    uint64_t non_idle = b->user + b->nice + b->system + b->irc + b->softirc + b->steal;
+
+    uint64_t prev_total = prev_idle + prev_non_idle;
+    uint64_t total = idle + non_idle;
+
+    uint64_t totald = total - prev_total;
+    uint64_t idled = idle - prev_idle;
+
+    double usage = (double) (totald - idled) / (double) totald;
+
+    return usage;
+}
+
+
+static double cpu_dev_usage(cpu_dev_t *cpu, double sample_rate) {
+    return (double) (cpu->nice + cpu->idle) * (100.0 / sample_rate) / (double) (cpu->nice + cpu->idle + cpu->iowait);
+}
 
 //===============================================================================
 // GUI
@@ -4132,12 +4241,12 @@ static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate)
 static list_t *ldevices = NULL;
 static pthread_mutex_t ldevices_mtx;
 
-static list_t* lnet_devs = NULL;
+static list_t *lnet_devs = NULL;
 static pthread_mutex_t lnet_devs_mtx;
 
 static atomic_bool programm_exit = false;
 static atomic_ulong sample_rate_mul = 10;
-
+static atomic_ulong cpu_usage = 0;
 
 
 static inline double device_get_sample_rate() {
@@ -4201,26 +4310,25 @@ void *ncurses_keypad(void *p) {
     return p;
 }
 
-static const char* animation_bug()
-{
+static const char *animation_bug() {
     static uint64_t frame = 0;
     static bool set = false;
     static bool way = true;
-    static const char* movie[48];
-    if(!set) {
+    static const char *movie[48];
+    if (!set) {
 
         set = true;
 
-        movie[0]  = "\xE2\x98\x83______________________________________________________________________________________________";
-        movie[1]  = "__\xE2\x98\x83____________________________________________________________________________________________";
-        movie[2]  = "____\xE2\x98\x83__________________________________________________________________________________________";
-        movie[3]  = "______\xE2\x98\x83________________________________________________________________________________________";
-        movie[4]  = "________\xE2\x98\x83______________________________________________________________________________________";
-        movie[5]  = "__________\xE2\x98\x83____________________________________________________________________________________";
-        movie[6]  = "____________\xE2\x98\x83__________________________________________________________________________________";
-        movie[7]  = "______________\xE2\x98\x83________________________________________________________________________________";
-        movie[8]  = "________________\xE2\x98\x83______________________________________________________________________________";
-        movie[9]  = "__________________\xE2\x98\x83____________________________________________________________________________";
+        movie[0] = "\xE2\x98\x83______________________________________________________________________________________________";
+        movie[1] = "__\xE2\x98\x83____________________________________________________________________________________________";
+        movie[2] = "____\xE2\x98\x83__________________________________________________________________________________________";
+        movie[3] = "______\xE2\x98\x83________________________________________________________________________________________";
+        movie[4] = "________\xE2\x98\x83______________________________________________________________________________________";
+        movie[5] = "__________\xE2\x98\x83____________________________________________________________________________________";
+        movie[6] = "____________\xE2\x98\x83__________________________________________________________________________________";
+        movie[7] = "______________\xE2\x98\x83________________________________________________________________________________";
+        movie[8] = "________________\xE2\x98\x83______________________________________________________________________________";
+        movie[9] = "__________________\xE2\x98\x83____________________________________________________________________________";
         movie[10] = "____________________\xE2\x98\x83__________________________________________________________________________";
         movie[11] = "______________________\xE2\x98\x83________________________________________________________________________";
         movie[12] = "________________________\xE2\x98\x83______________________________________________________________________";
@@ -4262,18 +4370,74 @@ static const char* animation_bug()
 
     }
 
-    if(frame >= 47)
+    if (frame >= 47)
         way = false;
 
-    if(frame == 0)
+    if (frame == 0)
         way = true;
 
 
-    if(way)
+    if (way)
         return movie[frame++];
     else
         return movie[frame--];
 }
+
+
+static void ncurses_cpu_bar_render(int row, int col) {
+    const char *lit = "❯";
+
+    string *gs = NULL;
+    string_init(&gs);
+    string *ys = NULL;
+    string_init(&ys);
+    string *rs = NULL;
+    string_init(&rs);
+
+    ulong cpus = atomic_load(&cpu_usage);
+    int64_t cu = (int64_t) cpus / 2;
+
+    for (int64_t i = 0; i < MIN(cu, 30); ++i) {
+        string_append(gs, lit);
+    }
+
+    for (int64_t i = 0; i < MIN(cu - 30, 15); ++i) {
+        string_append(ys, lit);
+    }
+
+    for (int64_t i = 0; i < MIN(cu - 45, 5); ++i) {
+        string_append(rs, lit);
+    }
+
+    char *gbar = string_makez(gs);
+    string_release(gs);
+
+    char *ybar = string_makez(ys);
+    string_release(ys);
+
+    char *rbar = string_makez(rs);
+    string_release(rs);
+
+    mvaddstr(row, 1, "[");
+    attron(COLOR_PAIR(2));
+    mvaddstr(row, 2, gbar);
+    attroff(COLOR_PAIR(2));
+    attron(COLOR_PAIR(4));
+    mvaddstr(row, 32, ybar);
+    attroff(COLOR_PAIR(4));
+    attron(COLOR_PAIR(5));
+    mvaddstr(row, 47, rbar);
+    attroff(COLOR_PAIR(5));
+
+    char load_s[32];
+    sprintf(load_s, "] %lu%% CPU", cpus);
+    mvaddstr(row, 52, load_s);
+
+    free(gbar);
+    free(ybar);
+    free(rbar);
+}
+
 
 void ncurses_window() {
     initscr();            /* Start curses mode 		  */
@@ -4296,9 +4460,11 @@ void ncurses_window() {
     init_pair(1, COLOR_WHITE, COLOR_BLACK);
     init_pair(2, COLOR_GREEN, COLOR_BLACK);
     init_pair(3, COLOR_CYAN, COLOR_BLACK);
+    init_pair(4, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(5, COLOR_RED, COLOR_BLACK);
 
     ulong frame_rate = 10;
-    ulong scr_upd = 1000000 /  frame_rate;
+    ulong scr_upd = 1000000 / frame_rate;
     while (!atomic_load(&programm_exit)) {
         int row = 1;
 
@@ -4310,6 +4476,7 @@ void ncurses_window() {
 
         mvaddstr(row++, 1, animation_bug());
         row++;
+
 
         char hwversion_s[128] = {0};
         sprintf(hwversion_s, "HWMonitor %d.%d%d", HW_VERSION_MAJOR, HW_VERSION_MINOR_A, HW_VERSION_MINOR_B);
@@ -4327,9 +4494,27 @@ void ncurses_window() {
 
         row++;
 
-        mvaddstr(row++, 1, "===============================================================================================");
-        mvaddstr(row++, 1, "---------------------------------------BLOCK DEVICES-------------------------------------------");
-        mvaddstr(row++, 1, "===============================================================================================");
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
+        mvaddstr(row++, 1,
+                 "--------------------------------------------CPU------------------------------------------------");
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
+
+        row++;
+
+        attroff(COLOR_PAIR(1));
+        ncurses_cpu_bar_render(row++, 1);
+        attron(COLOR_PAIR(1));
+
+        row++;
+
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
+        mvaddstr(row++, 1,
+                 "---------------------------------------BLOCK DEVICES-------------------------------------------");
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
 
         mvaddstr(++row, COLON_DEVICE, "Device");
         mvaddstr(row, COLON_READ, "Read");
@@ -4412,9 +4597,12 @@ void ncurses_window() {
         pthread_mutex_unlock(&ldevices_mtx);
 
         row++;
-        mvaddstr(row++, 1, "===============================================================================================");
-        mvaddstr(row++, 1, "----------------------------------------NET DEVICES--------------------------------------------");
-        mvaddstr(row++, 1, "===============================================================================================");
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
+        mvaddstr(row++, 1,
+                 "----------------------------------------NET DEVICES--------------------------------------------");
+        mvaddstr(row++, 1,
+                 "===============================================================================================");
         mvaddstr(++row, COLON_NET_NAME, "Device");
         mvaddstr(row, COLON_NET_READ, "RX");
         mvaddstr(row, COLON_NET_WRITE, "TX");
@@ -4424,7 +4612,7 @@ void ncurses_window() {
 
         pthread_mutex_lock(&lnet_devs_mtx);
 
-        if(lnet_devs) {
+        if (lnet_devs) {
 
             list_iter_init(lnet_devs, &it);
             net_dev_t *ndev = NULL;
@@ -4467,7 +4655,7 @@ void ncurses_window() {
 
         refresh(); // Print to the screen
 
-        usleep((__useconds_t)scr_upd);
+        usleep((__useconds_t) scr_upd);
     }
 
 
@@ -4562,22 +4750,21 @@ static void devices_get(list_t **devs) {
     sblk_execute(&blk);
 
 #ifndef NDEBUG
-    list_iter_t* list_it = NULL;
+    list_iter_t *list_it = NULL;
     list_iter_init(*devs, &list_it);
 
-    blk_dev_t* dev;
-    while((dev = (blk_dev_t*)list_iter_next(list_it)))
-    {
-        char* name = string_makez(dev->name);
-        char* syspath = string_makez(dev->sysfolder);
-        char* fs = string_makez(dev->fs);
-        char* model = string_makez(dev->model);
-        char* mount = string_makez(dev->mount);
-        char* uuid = string_makez(dev->uuid);
-        char* label = string_makez(dev->label);
+    blk_dev_t *dev;
+    while ((dev = (blk_dev_t *) list_iter_next(list_it))) {
+        char *name = string_makez(dev->name);
+        char *syspath = string_makez(dev->sysfolder);
+        char *fs = string_makez(dev->fs);
+        char *model = string_makez(dev->model);
+        char *mount = string_makez(dev->mount);
+        char *uuid = string_makez(dev->uuid);
+        char *label = string_makez(dev->label);
         LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
                           "[mount=%s][uuid=%s][label=%s]\n",
-                  (void*)dev, name, syspath,
+                  (void *) dev, name, syspath,
                   dev->size, dev->used, dev->avail, dev->use, dev->perc,
                   fs, model, mount, uuid, label
 
@@ -4774,6 +4961,40 @@ void *start_net_dev_sample(void *p) {
 
     return p;
 }
+
+//===============================================================================
+// CPU PROC SAMPLING
+//===============================================================================
+static void cpu_dev_sample(double sample_size_sec) {
+    cpu_dev_t *cpu_a = NULL;
+    cpu_dev_t *cpu_b = NULL;
+
+    cpu_dev_get(&cpu_a);
+
+    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
+    usleep(ustime);
+
+
+    cpu_dev_get(&cpu_b);
+
+
+    double usage = cpu_dev_diff_usage(cpu_a, cpu_b) * 100.0;
+
+    atomic_store(&cpu_usage, (ulong) usage);
+}
+
+void *start_cpu_dev_sample(void *p) {
+    while (!atomic_load(&programm_exit)) {
+        double sample_rate = device_get_sample_rate();
+#ifndef NDEBUG
+        cpu_dev_sample(sample_rate);
+#else
+        cpu_dev_sample(sample_rate);
+#endif
+    }
+
+    return p;
+}
 //===============================================================================
 // Misc
 //===============================================================================
@@ -4820,6 +5041,9 @@ int main() {
     pthread_t net_dev_t;
     pthread_create(&net_dev_t, NULL, &start_net_dev_sample, NULL);
 
+    pthread_t cpu_dev_t;
+    pthread_create(&cpu_dev_t, NULL, &start_cpu_dev_sample, NULL);
+
     signal(SIGINT, &sig_handler);
     signal(SIGTERM, &sig_handler);
     signal(SIGUSR1, &sig_handler);
@@ -4828,6 +5052,7 @@ int main() {
 
     pthread_join(t, NULL);
     pthread_join(net_dev_t, NULL);
+    pthread_join(cpu_dev_t, NULL);
     globals_shutdown();
 
 #ifdef ENABLE_LOGGING
