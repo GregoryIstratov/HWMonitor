@@ -305,7 +305,7 @@ typedef uint64_t ret_t;
 
 typedef struct ret_field
 {
-    union {
+    union{
         struct{
             uint8_t code;
             uint8_t depth;
@@ -3364,13 +3364,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%.2lf Kb/s", hr_size);
+            string_appendf(speed, "%04.2f Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%.2lf Mb/s", hr_size);
+            string_appendf(speed, "%04.2f Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%.2lf Gb/s", hr_size);
+            string_appendf(speed, "%04.2f Gb/s", hr_size);
             break;
         default:
             break;
@@ -3388,13 +3388,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%.2lf Kb/s", hr_size);
+            string_appendf(speed, "%04.2f Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%.2lf Mb/s", hr_size);
+            string_appendf(speed, "%04.2f Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%.2lf Gb/s", hr_size);
+            string_appendf(speed, "%04.2f Gb/s", hr_size);
             break;
         default:
             break;
@@ -3988,9 +3988,10 @@ static void scan_dir_dev(string* basedir, list_t* devs) {
 #define COLON_WRITE (22 + COLON_OFFSET)
 #define COLON_SIZE (35 + COLON_OFFSET)
 #define COLON_USE  (46 + COLON_OFFSET)
-#define COLON_FILESYSTEM (58 + COLON_OFFSET)
-#define COLON_MOUNT (64 + COLON_OFFSET)
-#define COLON_MODEL (80 + COLON_OFFSET)
+#define COLON_PERC (58 + COLON_OFFSET)
+#define COLON_FILESYSTEM (66 + COLON_OFFSET)
+#define COLON_MOUNT (76 + COLON_OFFSET)
+#define COLON_MODEL (86 + COLON_OFFSET)
 
 
 static list_t* ldevices = NULL;
@@ -4008,13 +4009,13 @@ static void ncruses_print_hr(int row, int col, uint64_t value)
     switch(type)
     {
         case HR_SIZE_KB:
-            sprintf(buffer, "%.2f Kb", size);
+            sprintf(buffer, "%04.2f Kb", size);
             break;
         case HR_SIZE_MB:
-            sprintf(buffer, "%.2f Mb", size);
+            sprintf(buffer, "%04.2f Mb", size);
             break;
         case HR_SIZE_GB:
-            sprintf(buffer, "%.2f Gb", size);
+            sprintf(buffer, "%04.2f Gb", size);
             break;
         default:
             break;
@@ -4052,11 +4053,12 @@ void ncurses_window() {
         mvaddstr(row++, 1, "Sample size 1.0 sec");
 
 
-        mvaddstr(row, COLON_DEVICE, "Device");
+        mvaddstr(++row, COLON_DEVICE, "Device");
         mvaddstr(row, COLON_READ, "Read");
         mvaddstr(row, COLON_WRITE, "Write");
         mvaddstr(row, COLON_SIZE, "Size");
         mvaddstr(row, COLON_USE, "Use");
+        mvaddstr(row, COLON_PERC, "%");
         mvaddstr(row, COLON_FILESYSTEM, "FS");
         mvaddstr(row, COLON_MOUNT, "Mount");
         mvaddstr(row++, COLON_MODEL, "Model");
@@ -4093,12 +4095,15 @@ void ncurses_window() {
             char* read  = string_makez(dev->perf_read);
             char* write = string_makez(dev->perf_write);
 
+            char perc[32] = {0};
+            sprintf(perc, "%03.1f %%", dev->perc);
 
             mvaddstr(row, COLON_DEVICE, name);
             mvaddstr(row, COLON_READ, read);
             mvaddstr(row, COLON_WRITE, write);
             ncruses_print_hr(row, COLON_SIZE, dev->size);
             ncruses_print_hr(row, COLON_USE, dev->used);
+            mvaddstr(row, COLON_PERC, perc);
             mvaddstr(row, COLON_FILESYSTEM, fs);
             mvaddstr(row, COLON_MOUNT, mount);
             mvaddstr(row++, COLON_MODEL, model);
@@ -4407,7 +4412,7 @@ void* start_sig_handler(void* p)
 int main() {
 
 #ifdef ENABLE_LOGGING
-    log_init(LOGLEVEL_ALL, "HWMonitor.log");
+    log_init(LOGLEVEL_NONE, "HWMonitor.log");
 #endif
 
     check_style_defines();
