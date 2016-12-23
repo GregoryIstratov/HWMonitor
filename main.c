@@ -25,15 +25,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <bits/mman.h>
 #include <ctype.h>
 #include <string.h>
+#include <assert.h>
 #include <regex.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <dirent.h>
 #include <stdatomic.h>
 
+
 //external
 #include <blkid/blkid.h> // apt install libblkid-dev
 #include <ncurses.h>     // apt install libncurses5-dev
+#include <locale.h>
+#include <math.h>
 
 //=======================================================================
 // SETTINGS
@@ -43,7 +47,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define SAFE_RELEASE(x) { if(x){ free(x); x = NULL; } }
 
 #define HW_VERSION_MAJOR 0
-#define HW_VERSION_MINOR 1
+#define HW_VERSION_MINOR_A 0
+#define HW_VERSION_MINOR_B 2
 #define STRING_INIT_BUFFER 4
 #define ALLOC_ALIGN 16
 
@@ -2446,7 +2451,7 @@ void test_list() {
 // SLIST
 //=======================================================================
 
-static void slist_fprint(list_t *sl) {
+static void slist_fprintd(list_t *sl) {
 
     if (!sl) {
         LOG_WARN("sl == NULL");
@@ -2466,7 +2471,7 @@ static void slist_fprint(list_t *sl) {
     }
 }
 
-static void slist_rfprint(list_t *sl) {
+static void slist_rfprintd(list_t *sl) {
     if (!sl) {
         LOG_WARN("sl == NULL");
         return;
@@ -2994,7 +2999,7 @@ static ret_t test_split() {
     string_split(text, '\n', &blklist);
 
     LOG_TRACE("------- LINES OF TOKENS -----------");
-    slist_fprint(blklist);
+    slist_fprintd(blklist);
 
     string *tk = NULL;
     list_iter_t *blkit = NULL;
@@ -3010,7 +3015,7 @@ static ret_t test_split() {
         list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
 
-        slist_fprint(tokens);
+        slist_fprintd(tokens);
 
         string *s = NULL;
         list_iter_t *token_it = NULL;
@@ -3021,7 +3026,7 @@ static ret_t test_split() {
             string_split(s, '=', &kv);
 
             LOG_TRACE("------- TOKEN KEY-VALUE -----------");
-            slist_fprint(kv);
+            slist_fprintd(kv);
 
 
             string *key = (string *) kv->head->data;
@@ -3115,6 +3120,9 @@ enum {
             TIME_IN_QUEUE = 10 /// milliseconds - total wait time for all requests
 };
 
+//===============================================================================
+// FILE UTILS
+//===============================================================================
 
 static size_t get_sfile_size(const char *filename) {
     struct stat st;
@@ -3225,10 +3233,10 @@ void human_readable_size(uint64_t bytes, double *result, int *type) {
 }
 
 //===============================================================================
-// DEVICE MANAGMENT
+// BLOCK DEVICE MANAGMENT
 //===============================================================================
 
-typedef struct device {
+typedef struct blk_dev {
     string *name;
     //struct statvfs stats;
     uint64_t stat[11];
@@ -3246,10 +3254,10 @@ typedef struct device {
     string *model;
     string *uuid;
     string *shed;
-} device_t;
+} blk_dev_t;
 
-static void device_release_cb(void *p) {
-    device_t *dev = (device_t *) p;
+static void blk_dev_release_cb(void *p) {
+    blk_dev_t *dev = (blk_dev_t *) p;
 
     if (dev->name) string_release(dev->name);
     if (dev->perf_read) string_release(dev->perf_read);
@@ -3265,11 +3273,11 @@ static void device_release_cb(void *p) {
     free(dev);
 }
 
-static device_t *device_list_search(list_t *devs, string *name) {
+static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
     list_iter_t *it = NULL;
     list_iter_init(devs, &it);
 
-    device_t *dev;
+    blk_dev_t *dev;
     while ((dev = list_iter_next(it))) {
         string *dev_devname = NULL;
         string_create(&dev_devname, "/dev/");
@@ -3291,11 +3299,11 @@ static device_t *device_list_search(list_t *devs, string *name) {
     return dev;
 }
 
-static device_t *device_list_direct_search(list_t *devs, string *name) {
+static blk_dev_t *blk_dev_list_direct_search(list_t *devs, string *name) {
     list_iter_t *it = NULL;
     list_iter_init(devs, &it);
 
-    device_t *dev;
+    blk_dev_t *dev;
     while ((dev = list_iter_next(it))) {
 
 
@@ -3311,7 +3319,7 @@ static device_t *device_list_direct_search(list_t *devs, string *name) {
     return dev;
 }
 
-static void device_diff(device_t *a, device_t *b, double sample_size) {
+static void blk_dev_diff(blk_dev_t *a, blk_dev_t *b, double sample_size) {
     static const uint64_t BLOCK_SIZE = 512; // Unix block size
 
     b->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
@@ -3366,6 +3374,9 @@ static void device_diff(device_t *a, device_t *b, double sample_size) {
     b->perf_write = speed;
 }
 
+//===============================================================================
+// CMD EXECUTOR
+//===============================================================================
 static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
     FILE *fpipe;
 
@@ -3393,6 +3404,9 @@ static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
 }
 
 
+//===============================================================================
+// df Utils
+//===============================================================================
 enum {
     DFS_NAME = 0,
     DFS_TOTAL = 1,
@@ -3444,7 +3458,7 @@ static void df_callback(void *ctx, list_t *lines) {
     df_t *df = (df_t *) ctx;
 
     LOG_TRACE("------- LINES OF TOKENS -----------");
-    slist_fprint(lines);
+    slist_fprintd(lines);
 
     string *tk = NULL;
     list_iter_t *line_it = NULL;
@@ -3463,7 +3477,7 @@ static void df_callback(void *ctx, list_t *lines) {
         list_t *tokens = NULL;
         string_split(tk, ' ', &tokens);
 
-        slist_fprint(tokens);
+        slist_fprintd(tokens);
 
 
         list_iter_t *tk_it = NULL;
@@ -3472,13 +3486,13 @@ static void df_callback(void *ctx, list_t *lines) {
 
         string *s = NULL;
         uint64_t k = 0;
-        device_t *dev = NULL;
+        blk_dev_t *dev = NULL;
         while ((s = slist_next(tk_it)) != NULL) {
 
             string_strip(s);
 
             if (k == DFS_NAME) {
-                dev = device_list_search(df->devs, s);
+                dev = blk_dev_list_search(df->devs, s);
                 if (dev == NULL)
                     break;
             }
@@ -3527,6 +3541,9 @@ static void df_execute(df_t *dfs) {
     cmd_execute(cmd, dfs, &df_callback);
 }
 
+//===============================================================================
+// blk utils
+//===============================================================================
 
 enum {
     BLK_NAME = 0,
@@ -3544,42 +3561,6 @@ typedef struct sblkid {
     list_t *devs;
 } sblkid_t;
 
-typedef struct {
-    char *ns;
-    char *ne;
-    char *vs;
-    char *ve;
-} kv_pair;
-
-enum {
-    SM_CHAR = 0,
-    SM_EQUAL,
-    SM_QUOTE,
-    SM_SPACE
-};
-
-
-static ret_t sm_token(char ch) {
-    if (ch == '"') return SM_QUOTE;
-    if (ch == '=') return SM_EQUAL;
-    if (isspace(ch)) return SM_SPACE;
-    return SM_CHAR;
-}
-
-#define FSM_CALLBACK(x) ((size_t)&x)
-
-
-typedef struct system {
-    hashtable_t *blk;
-} system_t;
-
-
-static ret_t system_init(system_t **sys) {
-    *sys = zalloc(sizeof(system_t));
-    ht_init(&(*sys)->blk);
-
-    return ST_OK;
-}
 
 static ret_t vector_add_kv(vector_t *vec, string *key, string *val) {
     skey_value_t *kv = zalloc(sizeof(skey_value_t));
@@ -3640,7 +3621,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
         char *tkp = NULL;
         string_create_nt(tk, &tkp);
 
-        device_t *dev = NULL;
+        blk_dev_t *dev = NULL;
         list_t *pairs = NULL;
         list_init(&pairs, &ss_kv_release_cb);
 
@@ -3712,7 +3693,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
             string_printd(kv->val);
 
             if (string_comparez(kv->key, "NAME") == RET_OK) {
-                dev = device_list_direct_search(sys->devs, kv->val);
+                dev = blk_dev_list_direct_search(sys->devs, kv->val);
             } else if (string_comparez(kv->key, "SCHED") == RET_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->shed);
@@ -3859,6 +3840,9 @@ static ret_t sblk_execute(sblkid_t *sblk) {
     return ST_OK;
 }
 
+//===============================================================================
+// BLOCK DEVICE SCANNER
+//===============================================================================
 
 static void scan_dir_dev(string *basedir, list_t *devs) {
     struct dirent *dir = NULL;
@@ -3877,7 +3861,7 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
 
             if (match) {
 
-                device_t *dev = zalloc(sizeof(device_t));
+                blk_dev_t *dev = zalloc(sizeof(blk_dev_t));
 
                 // create sysdir
                 string *sysdir = NULL;
@@ -3943,6 +3927,186 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
     }
 }
 
+//===============================================================================
+// NET DEVICE
+//===============================================================================
+
+typedef struct net_dev
+{
+    string*  name;
+    string*  sysdir;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    string*  tx_speed;
+    string*  rx_speed;
+    string*  speed;
+    string*  mtu;
+    double bandwidth_use;
+} net_dev_t;
+
+
+static void net_dev_release_cb(void* p)
+{
+    net_dev_t* dev = (net_dev_t*)p;
+    if(dev)
+    {
+        if(dev->name) string_release(dev->name);
+        if(dev->sysdir) string_release(dev->sysdir);
+        if(dev->tx_speed) string_release(dev->tx_speed);
+        if(dev->rx_speed) string_release(dev->rx_speed);
+        if(dev->mtu) string_release(dev->mtu);
+        if(dev->speed) string_release(dev->speed);
+        free(dev);
+    }
+}
+
+static inline string* file_read_subdir(string* subdir, const char* filepath)
+{
+    string* data = NULL;
+    string_init(&data);
+
+    string* filename = NULL;
+    string_dub(subdir, &filename);
+    string_append(filename, filepath);
+
+    char *filename_c = string_makez(filename);
+    file_read_all_s(filename_c, data);
+    string_strip(data);
+
+    free(filename_c);
+    string_release(filename);
+
+    return data;
+}
+
+static void net_dev_scan(list_t *devs) {
+    struct dirent *dir = NULL;
+
+    DIR *d = opendir("/sys/class/net/");
+
+    if (d) {
+        while ((dir = readdir(d))) {
+
+            if(strcmp(dir->d_name, ".") == 0)
+                continue;
+
+            if(strcmp(dir->d_name, "..") == 0)
+                continue;
+
+            string *dir_name = NULL;
+            string_create(&dir_name, dir->d_name);
+
+            net_dev_t *dev = zalloc(sizeof(net_dev_t));
+
+            // create sysdir
+            string *sysdir = NULL;
+            string_init(&sysdir);
+            string_append(sysdir, "/sys/class/net/");
+            string_add(sysdir, dir_name);
+            string_append(sysdir, "/");
+
+            // set name and sysdir
+            string_dub(dir_name, &dev->name);
+            dev->sysdir= sysdir;
+
+            // getting stats
+
+            dev->mtu = file_read_subdir(sysdir, "mtu");
+            dev->speed = file_read_subdir(sysdir, "speed");
+            string* rx_bytes_s = file_read_subdir(sysdir, "statistics/rx_bytes");
+            string* tx_bytes_s = file_read_subdir(sysdir, "statistics/tx_bytes");
+
+            string_to_u64(rx_bytes_s, &dev->rx_bytes);
+            string_to_u64(tx_bytes_s, &dev->tx_bytes);
+
+            string_release(rx_bytes_s);
+            string_release(tx_bytes_s);
+
+            // add dev to list
+            list_push(devs, dev);
+
+            string_release(dir_name);
+        }
+
+        closedir(d);
+    }
+}
+
+
+static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate)
+{
+    uint64_t drx = b->rx_bytes - a->rx_bytes;
+    uint64_t dtx = b->tx_bytes - a->tx_bytes;
+
+    uint64_t ispeed = 0;
+    string_to_u64(b->speed, &ispeed);
+    ispeed /= 8; // to megabytes
+    ispeed *= 1024 * 1024; // to bytes
+
+    if(!ispeed)
+        string_append(b->speed, "0 Mbits");
+    else
+        string_append(b->speed, " Mbits");
+
+    double pure_rxtx = (double)(drx + dtx)/sample_rate;
+    b->bandwidth_use = pure_rxtx/(double)ispeed;
+
+    if(isnan(b->bandwidth_use))
+        b->bandwidth_use = 0.0;
+
+    double hr_size = 0.0;
+    int size_type = -1;
+    human_readable_size(drx, &hr_size, &size_type);
+
+    hr_size /= sample_rate;
+
+    string *speed = NULL;
+    string_init(&speed);
+    switch (size_type) {
+        case HR_SIZE_KB:
+            string_appendf(speed, "%06.2f Kb/s", hr_size);
+            break;
+        case HR_SIZE_MB:
+            string_appendf(speed, "%06.2f Mb/s", hr_size);
+            break;
+        case HR_SIZE_GB:
+            string_appendf(speed, "%06.2f Gb/s", hr_size);
+            break;
+        default:
+            break;
+    }
+
+    if (b->rx_speed) string_release(b->rx_speed);
+    b->rx_speed = speed;
+
+
+    human_readable_size(dtx, &hr_size, &size_type);
+
+    hr_size /= sample_rate;
+
+    string_init(&speed);
+    switch (size_type) {
+        case HR_SIZE_KB:
+            string_appendf(speed, "%06.2f Kb/s", hr_size);
+            break;
+        case HR_SIZE_MB:
+            string_appendf(speed, "%06.2f Mb/s", hr_size);
+            break;
+        case HR_SIZE_GB:
+            string_appendf(speed, "%06.2f Gb/s", hr_size);
+            break;
+        default:
+            break;
+    }
+
+    if (b->tx_speed) string_release(b->tx_speed);
+    b->tx_speed = speed;
+}
+
+
+//===============================================================================
+// GUI
+//===============================================================================
 
 #define COLON_OFFSET 1
 #define COLON_DEVICE COLON_OFFSET
@@ -3957,10 +4121,23 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
 #define COLON_MODEL (83 + COLON_OFFSET)
 
 
+#define COLON_NET_NAME (COLON_DEVICE)
+#define COLON_NET_READ (COLON_READ)
+#define COLON_NET_WRITE (COLON_WRITE)
+#define COLON_NET_MTU (COLON_PERC-3)
+#define COLON_NET_SPEED (COLON_USE-3)
+#define COLON_NET_PERC (COLON_SIZE)
+
+
 static list_t *ldevices = NULL;
+static pthread_mutex_t ldevices_mtx;
+
+static list_t* lnet_devs = NULL;
+static pthread_mutex_t lnet_devs_mtx;
+
 static atomic_bool programm_exit = false;
 static atomic_ulong sample_rate_mul = 10;
-static pthread_mutex_t ldevices_mtx;
+
 
 
 static inline double device_get_sample_rate() {
@@ -3991,8 +4168,6 @@ static void ncruses_print_hr(int row, int col, uint64_t value) {
 }
 
 void *ncurses_keypad(void *p) {
-    int highlight = 1;
-    int choice = 0;
     int c;
     while (1) {
         c = wgetch(stdscr);
@@ -4026,6 +4201,79 @@ void *ncurses_keypad(void *p) {
     return p;
 }
 
+static const char* animation_bug()
+{
+    static uint64_t frame = 0;
+    static bool set = false;
+    static bool way = true;
+    static const char* movie[48];
+    if(!set) {
+
+        set = true;
+
+        movie[0]  = "\xE2\x98\x83______________________________________________________________________________________________";
+        movie[1]  = "__\xE2\x98\x83____________________________________________________________________________________________";
+        movie[2]  = "____\xE2\x98\x83__________________________________________________________________________________________";
+        movie[3]  = "______\xE2\x98\x83________________________________________________________________________________________";
+        movie[4]  = "________\xE2\x98\x83______________________________________________________________________________________";
+        movie[5]  = "__________\xE2\x98\x83____________________________________________________________________________________";
+        movie[6]  = "____________\xE2\x98\x83__________________________________________________________________________________";
+        movie[7]  = "______________\xE2\x98\x83________________________________________________________________________________";
+        movie[8]  = "________________\xE2\x98\x83______________________________________________________________________________";
+        movie[9]  = "__________________\xE2\x98\x83____________________________________________________________________________";
+        movie[10] = "____________________\xE2\x98\x83__________________________________________________________________________";
+        movie[11] = "______________________\xE2\x98\x83________________________________________________________________________";
+        movie[12] = "________________________\xE2\x98\x83______________________________________________________________________";
+        movie[13] = "__________________________\xE2\x98\x83____________________________________________________________________";
+        movie[14] = "____________________________\xE2\x98\x83__________________________________________________________________";
+        movie[15] = "______________________________\xE2\x98\x83________________________________________________________________";
+        movie[16] = "________________________________\xE2\x98\x83______________________________________________________________";
+        movie[17] = "__________________________________\xE2\x98\x83____________________________________________________________";
+        movie[18] = "____________________________________\xE2\x98\x83__________________________________________________________";
+        movie[19] = "______________________________________\xE2\x98\x83________________________________________________________";
+        movie[20] = "________________________________________\xE2\x98\x83______________________________________________________";
+        movie[21] = "__________________________________________\xE2\x98\x83____________________________________________________";
+        movie[22] = "____________________________________________\xE2\x98\x83__________________________________________________";
+        movie[23] = "______________________________________________\xE2\x98\x83________________________________________________";
+        movie[24] = "________________________________________________\xE2\x98\x83______________________________________________";
+        movie[25] = "__________________________________________________\xE2\x98\x83____________________________________________";
+        movie[26] = "____________________________________________________\xE2\x98\x83__________________________________________";
+        movie[27] = "______________________________________________________\xE2\x98\x83________________________________________";
+        movie[28] = "________________________________________________________\xE2\x98\x83______________________________________";
+        movie[29] = "__________________________________________________________\xE2\x98\x83____________________________________";
+        movie[30] = "____________________________________________________________\xE2\x98\x83__________________________________";
+        movie[31] = "______________________________________________________________\xE2\x98\x83________________________________";
+        movie[32] = "________________________________________________________________\xE2\x98\x83______________________________";
+        movie[33] = "__________________________________________________________________\xE2\x98\x83____________________________";
+        movie[34] = "____________________________________________________________________\xE2\x98\x83__________________________";
+        movie[35] = "______________________________________________________________________\xE2\x98\x83________________________";
+        movie[36] = "________________________________________________________________________\xE2\x98\x83______________________";
+        movie[37] = "__________________________________________________________________________\xE2\x98\x83____________________";
+        movie[38] = "____________________________________________________________________________\xE2\x98\x83__________________";
+        movie[39] = "______________________________________________________________________________\xE2\x98\x83________________";
+        movie[40] = "________________________________________________________________________________\xE2\x98\x83______________";
+        movie[41] = "__________________________________________________________________________________\xE2\x98\x83____________";
+        movie[42] = "____________________________________________________________________________________\xE2\x98\x83__________";
+        movie[43] = "______________________________________________________________________________________\xE2\x98\x83________";
+        movie[44] = "________________________________________________________________________________________\xE2\x98\x83______";
+        movie[45] = "__________________________________________________________________________________________\xE2\x98\x83____";
+        movie[46] = "____________________________________________________________________________________________\xE2\x98\x83__";
+        movie[47] = "______________________________________________________________________________________________\xE2\x98\x83";
+
+    }
+
+    if(frame >= 47)
+        way = false;
+
+    if(frame == 0)
+        way = true;
+
+
+    if(way)
+        return movie[frame++];
+    else
+        return movie[frame--];
+}
 
 void ncurses_window() {
     initscr();            /* Start curses mode 		  */
@@ -4049,16 +4297,22 @@ void ncurses_window() {
     init_pair(2, COLOR_GREEN, COLOR_BLACK);
     init_pair(3, COLOR_CYAN, COLOR_BLACK);
 
+    ulong frame_rate = 10;
+    ulong scr_upd = 1000000 /  frame_rate;
     while (!atomic_load(&programm_exit)) {
         int row = 1;
+
 
         clear();
 
         attron(A_BOLD);
         attron(COLOR_PAIR(1));
 
+        mvaddstr(row++, 1, animation_bug());
+        row++;
+
         char hwversion_s[128] = {0};
-        sprintf(hwversion_s, "HWMonitor %d.%02d", HW_VERSION_MAJOR, HW_VERSION_MINOR);
+        sprintf(hwversion_s, "HWMonitor %d.%d%d", HW_VERSION_MAJOR, HW_VERSION_MINOR_A, HW_VERSION_MINOR_B);
         mvaddstr(row++, 1, hwversion_s);
 
         mvaddstr(row++, 1, "Keypad: [UP - Increase sample rate][DOWN - Decrease sample rate][F10 Exit]");
@@ -4067,6 +4321,15 @@ void ncurses_window() {
         sprintf(samplesize_s, "Sample rate %05.3f sec", device_get_sample_rate());
         mvaddstr(row++, 1, samplesize_s);
 
+        char fps_s[64] = {0};
+        sprintf(fps_s, "FPS %lu", frame_rate);
+        mvaddstr(row++, 1, fps_s);
+
+        row++;
+
+        mvaddstr(row++, 1, "===============================================================================================");
+        mvaddstr(row++, 1, "---------------------------------------BLOCK DEVICES-------------------------------------------");
+        mvaddstr(row++, 1, "===============================================================================================");
 
         mvaddstr(++row, COLON_DEVICE, "Device");
         mvaddstr(row, COLON_READ, "Read");
@@ -4101,7 +4364,7 @@ void ncurses_window() {
 
         list_iter_t *it = NULL;
         list_iter_init(ldevices, &it);
-        device_t *dev = NULL;
+        blk_dev_t *dev = NULL;
         while ((dev = list_iter_next(it))) {
             attron(COLOR_PAIR(2));
 
@@ -4148,16 +4411,69 @@ void ncurses_window() {
 
         pthread_mutex_unlock(&ldevices_mtx);
 
+        row++;
+        mvaddstr(row++, 1, "===============================================================================================");
+        mvaddstr(row++, 1, "----------------------------------------NET DEVICES--------------------------------------------");
+        mvaddstr(row++, 1, "===============================================================================================");
+        mvaddstr(++row, COLON_NET_NAME, "Device");
+        mvaddstr(row, COLON_NET_READ, "RX");
+        mvaddstr(row, COLON_NET_WRITE, "TX");
+        mvaddstr(row, COLON_NET_MTU, "MTU");
+        mvaddstr(row, COLON_NET_SPEED, "Speed");
+        mvaddstr(row, COLON_NET_PERC, "%");
+
+        pthread_mutex_lock(&lnet_devs_mtx);
+
+        if(lnet_devs) {
+
+            list_iter_init(lnet_devs, &it);
+            net_dev_t *ndev = NULL;
+            while ((ndev = list_iter_next(it))) {
+                attron(COLOR_PAIR(2));
+
+                char *name = string_makez(ndev->name);
+                char *read = string_makez(ndev->rx_speed);
+                char *write = string_makez(ndev->tx_speed);
+                char *mtu = string_makez(ndev->mtu);
+                char *speed = string_makez(ndev->speed);
+
+
+                char perc[64] = {0};
+                sprintf(perc, "%04.1f%%", ndev->bandwidth_use);
+
+                mvaddstr(++row, COLON_NET_NAME, name);
+                mvaddstr(row, COLON_NET_READ, read);
+                mvaddstr(row, COLON_NET_WRITE, write);
+                mvaddstr(row, COLON_NET_MTU, mtu);
+                mvaddstr(row, COLON_NET_SPEED, speed);
+                mvaddstr(row, COLON_NET_PERC, perc);
+
+                free(speed);
+                free(mtu);
+                free(write);
+                free(read);
+                free(name);
+
+                attroff(COLOR_PAIR(2));
+            }
+
+            list_iter_release(it);
+
+        }
+
+        pthread_mutex_unlock(&lnet_devs_mtx);
+
         attroff(A_BOLD);
 
         refresh(); // Print to the screen
 
-        usleep(100000);
+        usleep((__useconds_t)scr_upd);
     }
 
 
     endwin();
 }
+
 
 static void check_style_defines() {
 #ifdef _POSIX_SOURCE
@@ -4221,10 +4537,14 @@ static void check_style_defines() {
 #endif
 }
 
+//===============================================================================
+// BLOCK DEVICE SAMPLING
+//===============================================================================
+
 static void devices_get(list_t **devs) {
     string *basedir = NULL;
 
-    list_init(devs, &device_release_cb);
+    list_init(devs, &blk_dev_release_cb);
 
     string_create(&basedir, "/sys/block/");
 
@@ -4245,8 +4565,8 @@ static void devices_get(list_t **devs) {
     list_iter_t* list_it = NULL;
     list_iter_init(*devs, &list_it);
 
-    device_t* dev;
-    while((dev = (device_t*)list_iter_next(list_it)))
+    blk_dev_t* dev;
+    while((dev = (blk_dev_t*)list_iter_next(list_it)))
     {
         char* name = string_makez(dev->name);
         char* syspath = string_makez(dev->sysfolder);
@@ -4296,8 +4616,8 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
     list_iter_t *it = NULL;
     list_iter_init(devs_a, &it);
 
-    device_t *dev_a;
-    device_t *dev_b;
+    blk_dev_t *dev_a;
+    blk_dev_t *dev_b;
     while ((dev_a = list_iter_next(it))) {
         list_iter_t *it2 = NULL;
         list_iter_init(devs_b, &it2);
@@ -4305,7 +4625,7 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
         while ((dev_b = list_iter_next(it2))) {
             ret_f_t cmp = return_map(string_compare(dev_a->name, dev_b->name));
             if (cmp.code == ST_OK && cmp.data == 0) {
-                device_diff(dev_a, dev_b, sample_size_sec);
+                blk_dev_diff(dev_a, dev_b, sample_size_sec);
                 break;
             }
 
@@ -4334,8 +4654,8 @@ void test_sampled_device(list_t *devs) {
 
     LOG_DEBUG("============SAMPLED DEVICES=============");
 
-    device_t *dev;
-    while ((dev = (device_t *) list_iter_next(list_it))) {
+    blk_dev_t *dev;
+    while ((dev = (blk_dev_t *) list_iter_next(list_it))) {
         char *name = string_makez(dev->name);
         char *syspath = string_makez(dev->sysfolder);
         char *fs = string_makez(dev->fs);
@@ -4381,6 +4701,83 @@ void *start_device_sample(void *p) {
     return p;
 }
 
+//===============================================================================
+// NET DEVICE SAMPLING
+//===============================================================================
+
+static void net_dev_get(list_t **devs) {
+    list_init(devs, &net_dev_release_cb);
+
+    net_dev_scan(*devs);
+}
+
+
+typedef void(*sampled_device_cb)(list_t *);
+
+
+static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
+    list_t *devs_a = NULL;
+    list_t *devs_b = NULL;
+
+    net_dev_get(&devs_a);
+
+    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
+    usleep(ustime);
+
+
+    net_dev_get(&devs_b);
+
+
+    list_iter_t *it = NULL;
+    list_iter_init(devs_a, &it);
+
+    net_dev_t *dev_a;
+    net_dev_t *dev_b;
+    while ((dev_a = list_iter_next(it))) {
+        list_iter_t *it2 = NULL;
+        list_iter_init(devs_b, &it2);
+
+        while ((dev_b = list_iter_next(it2))) {
+            ret_f_t cmp = return_map(string_compare(dev_a->name, dev_b->name));
+            if (cmp.code == ST_OK && cmp.data == 0) {
+                net_dev_diff(dev_a, dev_b, sample_size_sec);
+                break;
+            }
+
+        }
+
+        list_iter_release(it2);
+    }
+
+    list_iter_release(it);
+
+    list_release(devs_a, true);
+
+    if (cb) cb(devs_b);
+
+    pthread_mutex_lock(&lnet_devs_mtx);
+    if (lnet_devs) list_release(lnet_devs, true);
+    lnet_devs = devs_b;
+    pthread_mutex_unlock(&lnet_devs_mtx);
+
+}
+
+void *start_net_dev_sample(void *p) {
+    while (!atomic_load(&programm_exit)) {
+        double sample_rate = device_get_sample_rate();
+#ifndef NDEBUG
+        net_dev_sample(sample_rate, NULL);
+#else
+        net_dev_sample(sample_rate, NULL);
+#endif
+    }
+
+    return p;
+}
+//===============================================================================
+// Misc
+//===============================================================================
+
 void sig_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
         LOG_ERROR("Stopping the programm");
@@ -4397,6 +4794,12 @@ void sig_handler(int signo) {
 
 int main() {
 
+    if (!setlocale(LC_CTYPE, "")) {
+        fprintf(stderr, "Can't set the specified locale! "
+                "Check LANG, LC_CTYPE, LC_ALL.\n");
+        return 1;
+    }
+
 #ifdef ENABLE_LOGGING
     log_init(LOGLEVEL_NONE, "HWMonitor.log");
 #endif
@@ -4405,13 +4808,17 @@ int main() {
 
 #ifndef NDEBUG
     check_style_defines();
-    tests_run();
+    //tests_run();
 #endif
 
     pthread_mutex_init(&ldevices_mtx, NULL);
 
     pthread_t t;
     pthread_create(&t, NULL, &start_device_sample, NULL);
+
+
+    pthread_t net_dev_t;
+    pthread_create(&net_dev_t, NULL, &start_net_dev_sample, NULL);
 
     signal(SIGINT, &sig_handler);
     signal(SIGTERM, &sig_handler);
@@ -4420,6 +4827,7 @@ int main() {
     ncurses_window();
 
     pthread_join(t, NULL);
+    pthread_join(net_dev_t, NULL);
     globals_shutdown();
 
 #ifdef ENABLE_LOGGING
