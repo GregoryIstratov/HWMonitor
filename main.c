@@ -37,7 +37,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <blkid/blkid.h> // apt install libblkid-dev
 #include <ncurses.h>     // apt install libncurses5-dev
 #include <stdbool.h>
-#include <mcheck.h>
 #include <dirent.h>
 
 //=======================================================================
@@ -3364,13 +3363,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%04.2f Kb/s", hr_size);
+            string_appendf(speed, "%06.2f Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%04.2f Mb/s", hr_size);
+            string_appendf(speed, "%06.2f Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%04.2f Gb/s", hr_size);
+            string_appendf(speed, "%06.2f Gb/s", hr_size);
             break;
         default:
             break;
@@ -3388,13 +3387,13 @@ static void device_diff(device_t* a, device_t* b, double sample_size) {
     switch (size_type)
     {
         case HR_SIZE_KB:
-            string_appendf(speed, "%04.2f Kb/s", hr_size);
+            string_appendf(speed, "%06.2f Kb/s", hr_size);
             break;
         case HR_SIZE_MB:
-            string_appendf(speed, "%04.2f Mb/s", hr_size);
+            string_appendf(speed, "%06.2f Mb/s", hr_size);
             break;
         case HR_SIZE_GB:
-            string_appendf(speed, "%04.2f Gb/s", hr_size);
+            string_appendf(speed, "%06.2f Gb/s", hr_size);
             break;
         default:
             break;
@@ -3990,7 +3989,7 @@ static void scan_dir_dev(string* basedir, list_t* devs) {
 #define COLON_USE  (46 + COLON_OFFSET)
 #define COLON_PERC (58 + COLON_OFFSET)
 #define COLON_FILESYSTEM (66 + COLON_OFFSET)
-#define COLON_MOUNT (76 + COLON_OFFSET)
+#define COLON_MOUNT (73 + COLON_OFFSET)
 #define COLON_MODEL (86 + COLON_OFFSET)
 
 
@@ -4009,13 +4008,13 @@ static void ncruses_print_hr(int row, int col, uint64_t value)
     switch(type)
     {
         case HR_SIZE_KB:
-            sprintf(buffer, "%04.2f Kb", size);
+            sprintf(buffer, "%06.2f Kb", size);
             break;
         case HR_SIZE_MB:
-            sprintf(buffer, "%04.2f Mb", size);
+            sprintf(buffer, "%06.2f Mb", size);
             break;
         case HR_SIZE_GB:
-            sprintf(buffer, "%04.2f Gb", size);
+            sprintf(buffer, "%06.2f Gb", size);
             break;
         default:
             break;
@@ -4096,7 +4095,7 @@ void ncurses_window() {
             char* write = string_makez(dev->perf_write);
 
             char perc[32] = {0};
-            sprintf(perc, "%03.1f %%", dev->perc);
+            sprintf(perc, "%04.1f %%", dev->perc);
 
             mvaddstr(row, COLON_DEVICE, name);
             mvaddstr(row, COLON_READ, read);
