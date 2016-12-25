@@ -3349,8 +3349,8 @@ typedef struct blk_dev {
     string *name;
     //struct statvfs stats;
     uint64_t stat[11];
-    string *perf_read;
-    string *perf_write;
+    double perf_read;
+    double perf_write;
     string *label;
     uint64_t size;
     uint64_t used;
@@ -3369,8 +3369,6 @@ static void blk_dev_release_cb(void *p) {
     blk_dev_t *dev = (blk_dev_t *) p;
 
     if (dev->name) string_release(dev->name);
-    if (dev->perf_read) string_release(dev->perf_read);
-    if (dev->perf_write) string_release(dev->perf_write);
     if (dev->label) string_release(dev->label);
     if (dev->fs) string_release(dev->fs);
     if (dev->mount) string_release(dev->mount);
@@ -3434,53 +3432,8 @@ static void blk_dev_diff(blk_dev_t *a, blk_dev_t *b, double sample_size) {
     b->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
     b->stat[READ_SECTORS] = b->stat[READ_SECTORS] - a->stat[READ_SECTORS];
 
-    double hr_size = 0.0;
-    int size_type = -1;
-    human_readable_size(b->stat[READ_SECTORS] * BLOCK_SIZE, &hr_size, &size_type);
-
-    hr_size /= sample_size;
-
-    string *speed = NULL;
-    string_init(&speed);
-    switch (size_type) {
-        case HR_SIZE_KB:
-            string_appendf(speed, "%06.2f Kb/s", hr_size);
-            break;
-        case HR_SIZE_MB:
-            string_appendf(speed, "%06.2f Mb/s", hr_size);
-            break;
-        case HR_SIZE_GB:
-            string_appendf(speed, "%06.2f Gb/s", hr_size);
-            break;
-        default:
-            break;
-    }
-
-    if (b->perf_read) string_release(b->perf_read);
-    b->perf_read = speed;
-
-
-    human_readable_size(b->stat[WRITE_SECTORS] * BLOCK_SIZE, &hr_size, &size_type);
-
-    hr_size /= sample_size;
-
-    string_init(&speed);
-    switch (size_type) {
-        case HR_SIZE_KB:
-            string_appendf(speed, "%06.2f Kb/s", hr_size);
-            break;
-        case HR_SIZE_MB:
-            string_appendf(speed, "%06.2f Mb/s", hr_size);
-            break;
-        case HR_SIZE_GB:
-            string_appendf(speed, "%06.2f Gb/s", hr_size);
-            break;
-        default:
-            break;
-    }
-
-    if (b->perf_write) string_release(b->perf_write);
-    b->perf_write = speed;
+    b->perf_read = b->stat[READ_SECTORS] * BLOCK_SIZE / sample_size;
+    b->perf_write = b->stat[WRITE_SECTORS] * BLOCK_SIZE / sample_size;
 }
 
 //===============================================================================
@@ -4045,8 +3998,8 @@ typedef struct net_dev {
     string *sysdir;
     uint64_t rx_bytes;
     uint64_t tx_bytes;
-    string *tx_speed;
-    string *rx_speed;
+    double tx_speed;
+    double rx_speed;
     string *speed;
     string *mtu;
     double bandwidth_use;
@@ -4058,8 +4011,6 @@ static void net_dev_release_cb(void *p) {
     if (dev) {
         if (dev->name) string_release(dev->name);
         if (dev->sysdir) string_release(dev->sysdir);
-        if (dev->tx_speed) string_release(dev->tx_speed);
-        if (dev->rx_speed) string_release(dev->rx_speed);
         if (dev->mtu) string_release(dev->mtu);
         if (dev->speed) string_release(dev->speed);
         free(dev);
@@ -4158,53 +4109,9 @@ static void net_dev_diff(net_dev_t *a, net_dev_t *b, double sample_rate) {
     if (isnan(b->bandwidth_use))
         b->bandwidth_use = 0.0;
 
-    double hr_size = 0.0;
-    int size_type = -1;
-    human_readable_size(drx, &hr_size, &size_type);
 
-    hr_size /= sample_rate;
-
-    string *speed = NULL;
-    string_init(&speed);
-    switch (size_type) {
-        case HR_SIZE_KB:
-            string_appendf(speed, "%06.2f Kb/s", hr_size);
-            break;
-        case HR_SIZE_MB:
-            string_appendf(speed, "%06.2f Mb/s", hr_size);
-            break;
-        case HR_SIZE_GB:
-            string_appendf(speed, "%06.2f Gb/s", hr_size);
-            break;
-        default:
-            break;
-    }
-
-    if (b->rx_speed) string_release(b->rx_speed);
-    b->rx_speed = speed;
-
-
-    human_readable_size(dtx, &hr_size, &size_type);
-
-    hr_size /= sample_rate;
-
-    string_init(&speed);
-    switch (size_type) {
-        case HR_SIZE_KB:
-            string_appendf(speed, "%06.2f Kb/s", hr_size);
-            break;
-        case HR_SIZE_MB:
-            string_appendf(speed, "%06.2f Mb/s", hr_size);
-            break;
-        case HR_SIZE_GB:
-            string_appendf(speed, "%06.2f Gb/s", hr_size);
-            break;
-        default:
-            break;
-    }
-
-    if (b->tx_speed) string_release(b->tx_speed);
-    b->tx_speed = speed;
+    b->rx_speed = drx / sample_rate;
+    b->tx_speed = dtx / sample_rate;
 }
 
 //===============================================================================
@@ -4447,6 +4354,11 @@ static void mem_info_get(mem_info_t** mem_info)
 //===============================================================================
 // GUI
 //===============================================================================
+#define NCOLOR_PAIR_WHITE_ON_BLACK  1
+#define NCOLOR_PAIR_GREEN_ON_BLACK  2
+#define NCOLOR_PAIR_CYAN_ON_BLACK   3
+#define NCOLOR_PAIR_YELLOW_ON_BLACK 4
+#define NCOLOR_PAIR_RED_ON_BLACK    5
 
 #define COLON_OFFSET 1
 #define COLON_DEVICE COLON_OFFSET
@@ -4512,6 +4424,72 @@ static void ncruses_print_hr(int row, int col, uint64_t value) {
     }
 
     mvaddstr(row, col, buffer);
+}
+
+void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier) {
+
+    double r = bytes / 1024.0;
+    if (r < 1024)  // KB / sec
+    {
+        char s[64] = {0};
+        sprintf(s, "%06.2f Kb/s", r);
+
+        if(r > 0)
+        {
+            attron(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
+            mvaddstr(row, col, s);
+            attroff(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
+        } else
+        {
+            attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
+            mvaddstr(row, col, s);
+            attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
+        }
+
+        return;
+    }
+
+    r = bytes / 1024 / 1024;
+    if (r < 1024)  // MiB / sec
+    {
+        char s[64] = {0};
+        sprintf(s, "%06.2f Mb/s", r);
+
+        attron(A_BOLD);
+        if(r < green_barier) {
+            attron(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
+            mvaddstr(row, col, s);
+            attroff(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
+        }
+        else if(r < (green_barier * 3))
+        {
+            attron(COLOR_PAIR(NCOLOR_PAIR_YELLOW_ON_BLACK));
+            mvaddstr(row, col, s);
+            attroff(COLOR_PAIR(NCOLOR_PAIR_YELLOW_ON_BLACK));
+        }
+        else
+        {
+            attron(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
+            mvaddstr(row, col, s);
+            attroff(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
+        }
+        attroff(A_BOLD);
+        return;
+    }
+
+    r = bytes / 1024 / 1024 / 1024;
+    {
+        char s[64] = {0};
+        sprintf(s, "%06.2f Gb/s", r);
+
+        attron(A_BOLD);
+        attron(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
+        mvaddstr(row, col, s);
+        attroff(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
+        attroff(A_BOLD);
+
+        return;
+    }
 }
 
 void *ncurses_keypad(void *p) {
@@ -4718,11 +4696,11 @@ void ncurses_window() {
     pthread_setname_np(keypad__thrd, "keypad");
     pthread_detach(keypad__thrd);
 
-    init_pair(1, COLOR_WHITE, COLOR_BLACK);
-    init_pair(2, COLOR_GREEN, COLOR_BLACK);
-    init_pair(3, COLOR_CYAN, COLOR_BLACK);
-    init_pair(4, COLOR_YELLOW, COLOR_BLACK);
-    init_pair(5, COLOR_RED, COLOR_BLACK);
+    init_pair(NCOLOR_PAIR_WHITE_ON_BLACK, COLOR_WHITE, COLOR_BLACK);
+    init_pair(NCOLOR_PAIR_GREEN_ON_BLACK, COLOR_GREEN, COLOR_BLACK);
+    init_pair(NCOLOR_PAIR_CYAN_ON_BLACK, COLOR_CYAN, COLOR_BLACK);
+    init_pair(NCOLOR_PAIR_YELLOW_ON_BLACK, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(NCOLOR_PAIR_RED_ON_BLACK, COLOR_RED, COLOR_BLACK);
 
     ulong frame_rate = 10;
     ulong scr_upd = 1000000 / frame_rate;
@@ -4733,7 +4711,7 @@ void ncurses_window() {
         clear();
 
         attron(A_BOLD);
-        attron(COLOR_PAIR(1));
+        attron(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
 
         mvaddstr(row++, 1, animation_bug());
         row++;
@@ -4776,9 +4754,9 @@ void ncurses_window() {
 
         row++;
 
-        attroff(COLOR_PAIR(1));
+        attroff(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
         ncurses_cpu_bar_render(row++, 1);
-        attron(COLOR_PAIR(1));
+        attron(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
 
 
 
@@ -4836,25 +4814,25 @@ void ncurses_window() {
             list_iter_init(ldevices, &it);
             blk_dev_t *dev = NULL;
             while ((dev = list_iter_next(it))) {
-                attron(COLOR_PAIR(3));
+                attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
 
                 char *name = string_makez(dev->name);
-                //char *syspath = string_makez(dev->sysfolder);
                 char *fs = string_makez(dev->fs);
                 char *model = string_makez(dev->model);
                 char *mount = string_makez(dev->mount);
-                //char *uuid = string_makez(dev->uuid);
-                //char *label = string_makez(dev->label);
+
                 char *shed = string_makez(dev->shed);
-                char *read = string_makez(dev->perf_read);
-                char *write = string_makez(dev->perf_write);
 
                 char perc[32] = {0};
                 sprintf(perc, "%04.1f%%", dev->perc);
 
                 mvaddstr(row, COLON_DEVICE, name);
-                mvaddstr(row, COLON_READ, read);
-                mvaddstr(row, COLON_WRITE, write);
+
+                attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
+                ncruses_print_hr_speed(row, COLON_READ, dev->perf_read, 100.);
+                ncruses_print_hr_speed(row, COLON_WRITE, dev->perf_write, 100.);
+                attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
+
                 ncruses_print_hr(row, COLON_SIZE, dev->size);
                 ncruses_print_hr(row, COLON_USE, dev->used);
                 mvaddstr(row, COLON_PERC, perc);
@@ -4863,18 +4841,14 @@ void ncurses_window() {
                 mvaddstr(row, COLON_MOUNT, mount);
                 mvaddstr(row++, COLON_MODEL, model);
 
-                free(write);
-                free(read);
+
                 free(shed);
-                //free(label);
-                //free(uuid);
                 free(mount);
                 free(model);
                 free(fs);
-                //free(syspath);
                 free(name);
 
-                attroff(COLOR_PAIR(3));
+                attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
             }
 
             list_iter_release(it);
@@ -4903,11 +4877,9 @@ void ncurses_window() {
             list_iter_init(lnet_devs, &it);
             net_dev_t *ndev = NULL;
             while ((ndev = list_iter_next(it))) {
-                attron(COLOR_PAIR(3));
+                attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
 
                 char *name = string_makez(ndev->name);
-                char *read = string_makez(ndev->rx_speed);
-                char *write = string_makez(ndev->tx_speed);
                 char *mtu = string_makez(ndev->mtu);
                 char *speed = string_makez(ndev->speed);
 
@@ -4916,19 +4888,19 @@ void ncurses_window() {
                 sprintf(perc, "%04.1f%%", ndev->bandwidth_use);
 
                 mvaddstr(++row, COLON_NET_NAME, name);
-                mvaddstr(row, COLON_NET_READ, read);
-                mvaddstr(row, COLON_NET_WRITE, write);
+                attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
+                ncruses_print_hr_speed(row, COLON_NET_READ, ndev->rx_speed, 1.5);
+                ncruses_print_hr_speed(row, COLON_NET_WRITE, ndev->tx_speed, 1.5);
+                attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
                 mvaddstr(row, COLON_NET_MTU, mtu);
                 mvaddstr(row, COLON_NET_SPEED, speed);
                 mvaddstr(row, COLON_NET_PERC, perc);
 
                 free(speed);
                 free(mtu);
-                free(write);
-                free(read);
                 free(name);
 
-                attroff(COLOR_PAIR(3));
+                attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
             }
 
             list_iter_release(it);
@@ -5121,51 +5093,11 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
 }
 
 
-void test_sampled_device(list_t *devs) {
-    list_iter_t *list_it = NULL;
-    list_iter_init(devs, &list_it);
-
-    LOG_DEBUG("============SAMPLED DEVICES=============");
-
-    blk_dev_t *dev;
-    while ((dev = (blk_dev_t *) list_iter_next(list_it))) {
-        char *name = string_makez(dev->name);
-        char *syspath = string_makez(dev->sysfolder);
-        char *fs = string_makez(dev->fs);
-        char *model = string_makez(dev->model);
-        char *mount = string_makez(dev->mount);
-        char *uuid = string_makez(dev->uuid);
-        char *label = string_makez(dev->label);
-        char *read = string_makez(dev->perf_read);
-        char *write = string_makez(dev->perf_write);
-        LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
-                          "[mount=%s][uuid=%s][label=%s][read=%s][write=%s]\n",
-                  (void *) dev, name, syspath,
-                  dev->size, dev->used, dev->avail, dev->use, dev->perc,
-                  fs, model, mount, uuid, label,
-                  read, write
-
-        );
-
-        free(write);
-        free(read);
-        free(label);
-        free(uuid);
-        free(mount);
-        free(model);
-        free(fs);
-        free(syspath);
-        free(name);
-    }
-
-    list_iter_release(list_it);
-}
-
 void *start_device_sample(void *p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
-        devices_sample(sample_rate, &test_sampled_device);
+        devices_sample(sample_rate, NULL);
 #else
         devices_sample(sample_rate, NULL);
 #endif
