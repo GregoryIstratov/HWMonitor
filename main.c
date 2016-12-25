@@ -13,11 +13,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 **************************************************************************************/
 
-
-#include <fcntl.h>
+#include <features.h>
 #include <unistd.h>
-#include <malloc.h>
-#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/param.h>
@@ -33,10 +32,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdatomic.h>
 #include <locale.h>
 #include <math.h>
+#include <stdlib.h>
 
 //external
 //#include <blkid/blkid.h> // apt install libblkid-dev
 #include <ncurses.h>     // apt install libncurses5-dev
+#include <asm/errno.h>
+#include <errno.h>
+
 
 
 //=======================================================================
@@ -62,7 +65,51 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define MiB 1048576UL
 #define GiB 1073741824UL
 
-#define DEVICE_BASE_SAMPLE_RATE 0.1
+#define DEVICE_BASE_SAMPLE_RATE 0.01
+
+#define NANOSEC_IN_SEC      1000000000.0
+#define NANOSEC_IN_MILLISEC 1000000.0
+
+//=======================================================================
+// TIMERS AND SLEEP
+//=======================================================================
+
+static struct timespec timer_start(){
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    return start_time;
+}
+
+static double timer_end_ms(struct timespec start_time){
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+
+    time_t ds = end_time.tv_sec - start_time.tv_sec;
+    double dns = ds * NANOSEC_IN_SEC + (end_time.tv_nsec - start_time.tv_nsec);
+
+    return dns / NANOSEC_IN_MILLISEC;
+}
+
+static void nsleep(uint64_t nanoseconds)
+{
+    struct timespec req;
+
+    req.tv_sec = (time_t)(nanoseconds/(uint64_t)NANOSEC_IN_SEC);
+    req.tv_nsec = nanoseconds % (ulong)NANOSEC_IN_SEC;
+
+    struct timespec rem = {0,0};
+
+    while(nanosleep(&req, &rem) == -1 && errno == EINTR)
+    {
+        req = rem;
+    }
+
+}
+
+static inline void nsleepd(double seconds)
+{
+    nsleep((uint64_t)(seconds * NANOSEC_IN_SEC));
+}
 
 //=======================================================================
 // LOG
@@ -4394,7 +4441,7 @@ static mem_info_t *g_mem_info = NULL;
 static pthread_mutex_t mem_info_mtx;
 
 static atomic_bool programm_exit = false;
-static atomic_ulong sample_rate_mul = 10;
+static atomic_ulong sample_rate_mul = 100;
 static atomic_ulong cpu_usage = 0;
 
 static uint64_t g_nframe = 0;
@@ -4702,9 +4749,13 @@ void ncurses_window() {
     init_pair(NCOLOR_PAIR_YELLOW_ON_BLACK, COLOR_YELLOW, COLOR_BLACK);
     init_pair(NCOLOR_PAIR_RED_ON_BLACK, COLOR_RED, COLOR_BLACK);
 
-    ulong frame_rate = 10;
-    ulong scr_upd = 1000000 / frame_rate;
+
+    double frame_time = 1.0;
     while (!atomic_load(&programm_exit)) {
+        struct timespec tm_start = timer_start();
+
+        double frame_rate = 1.0/device_get_sample_rate();
+        uint64_t scr_upd = (uint64_t)(NANOSEC_IN_SEC / frame_rate);
         int row = 1;
         ++g_nframe;
 
@@ -4727,9 +4778,8 @@ void ncurses_window() {
         sprintf(samplesize_s, "Sample rate %05.3f sec", device_get_sample_rate());
         mvaddstr(row++, 1, samplesize_s);
 
-        char fps_s[64] = {0};
-        sprintf(fps_s, "FPS %lu", frame_rate);
-        mvaddstr(row++, 1, fps_s);
+        ncurses_addstrf(row++, 1, "Frame time: %.3f ms", frame_time);
+        ncurses_addstrf(row++, 1, "FPS: %.2f", (1000.0 / frame_time));
 
         row++;
         mvaddstr(row++, 1,
@@ -4912,8 +4962,11 @@ void ncurses_window() {
         attroff(A_BOLD);
 
         refresh(); // Print to the screen
+#ifndef HW_NO_SLEEP
+        nsleep((uint64_t)scr_upd);
+#endif
 
-        usleep((__useconds_t) scr_upd);
+        frame_time = timer_end_ms(tm_start);
     }
 
 
@@ -5051,8 +5104,9 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
 
     devices_get(&devs_a);
 
-    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
-    usleep(ustime);
+#ifndef HW_NO_SLEEP
+    nsleepd(sample_size_sec);
+#endif
 
 
     devices_get(&devs_b);
@@ -5126,8 +5180,9 @@ static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
 
     net_dev_get(&devs_a);
 
-    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
-    usleep(ustime);
+#ifndef HW_NO_SLEEP
+    nsleepd(sample_size_sec);
+#endif
 
 
     net_dev_get(&devs_b);
@@ -5200,8 +5255,9 @@ static void cpu_dev_sample(double sample_size_sec) {
 
     cpu_dev_get(&cpu_a);
 
-    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
-    usleep(ustime);
+#ifndef HW_NO_SLEEP
+    nsleepd(sample_size_sec);
+#endif
 
     cpu_dev_get(&cpu_b);
 
@@ -5244,8 +5300,9 @@ static void mem_info_sample(double sample_size_sec) {
     pthread_mutex_unlock(&mem_info_mtx);
 
 
-    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
-    usleep(ustime);
+#ifndef HW_NO_SLEEP
+    nsleepd(sample_size_sec);
+#endif
 }
 
 void *start_mem_info_sample(void *p) {
