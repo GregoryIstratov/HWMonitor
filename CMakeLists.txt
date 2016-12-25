@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.6)
 project(HWMonitor)
 
 add_definitions(-D_DEFAULT_SOURCE)
-#add_definitions(-D_GNU_SOURCE)
+add_definitions(-D_GNU_SOURCE)
 
 #set(VALGRIND_ENABLE 1)
 
@@ -25,4 +25,4 @@ endif()
 
 set(SOURCE_FILES main.c)
 add_executable(HWMonitor ${SOURCE_FILES})
-target_link_libraries(HWMonitor blkid ncurses pthread)
+target_link_libraries(HWMonitor ncurses pthread)

@@ -31,13 +31,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdbool.h>
 #include <dirent.h>
 #include <stdatomic.h>
-
-
-//external
-#include <blkid/blkid.h> // apt install libblkid-dev
-#include <ncurses.h>     // apt install libncurses5-dev
 #include <locale.h>
 #include <math.h>
+
+//external
+//#include <blkid/blkid.h> // apt install libblkid-dev
+#include <ncurses.h>     // apt install libncurses5-dev
+
 
 //=======================================================================
 // SETTINGS
@@ -48,7 +48,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define HW_VERSION_MAJOR 0
 #define HW_VERSION_MINOR_A 0
-#define HW_VERSION_MINOR_B 3
+#define HW_VERSION_MINOR_B 4
 
 
 #define STRING_INIT_BUFFER 4
@@ -1427,656 +1427,6 @@ static void test_da() {
     da_release(df);
     df = NULL;
 }
-
-//=======================================================================
-// REGEX
-//=======================================================================
-
-#define MAX_ERROR_MSG 0x1000
-
-/* Compile the regular expression described by "regex_text" into
-   "r". */
-
-static ret_t regex_compile(regex_t *r, const char *pattern) {
-    int status = regcomp(r, pattern, REG_EXTENDED | REG_NEWLINE);
-    if (status != 0) {
-        char error_message[MAX_ERROR_MSG];
-        regerror(status, r, error_message, MAX_ERROR_MSG);
-
-        LOG_ERROR("Regex error compiling '%s': %s",
-                  pattern, error_message);
-        return return_create(ST_ERR);
-    }
-    return ST_OK;
-}
-
-static bool regex_match(regex_t *r, const char *text) {
-    regmatch_t m[10];
-    int nomatch = regexec(r, text, 10, m, 0);
-    if (nomatch) {
-        return false;
-    }
-
-    return true;
-}
-
-//=======================================================================
-// STRING
-//=======================================================================
-
-typedef struct {
-    union {
-        uint8_t _[sizeof(dynamic_allocator_t)];
-        dynamic_allocator_t da;
-    };
-
-} string;
-
-
-#define _da(x) ((dynamic_allocator_t*)x)
-#define _dap(x) ((dynamic_allocator_t**)x)
-
-typedef struct skey_value {
-    string *key;
-    string *value;
-} skey_value_t;
-
-static string *string_null = NULL;
-
-static ret_t string_init(string **sp) {
-    return da_init(_dap(sp));
-}
-
-static ret_t string_release(string *s) {
-    return da_release(_da(s));
-}
-
-static void string_release_cb(void *p) {
-    string_release((string *) p);
-}
-
-static const char *string_cdata(string *s) {
-    return _da(s)->ptr;
-}
-
-static size_t string_size(string *s) {
-    return _da(s)->used;
-}
-
-static char string_char(string *s, size_t idx) {
-    if (idx > string_size(s)) {
-        LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
-        return (char) -1;
-    }
-
-    return _da(s)->ptr[idx];
-}
-
-static ret_t string_create_nt(string *s, char **buff) {
-    size_t ssize = string_size(s);
-    *buff = zalloc(ssize + 1);
-    memcpy(*buff, string_cdata(s), ssize);
-
-    return ST_OK;
-}
-
-///deep copy
-static ret_t string_dub(string *s, string **ns) {
-    return da_dub(_da(s), _dap(ns));
-}
-
-static ret_t string_append(string *s, const char *str) {
-    size_t len = strlen(str);
-    return da_append(_da(s), str, len);
-
-}
-
-static ret_t string_appendf(string *s, const char *fmt, ...) {
-    static const size_t FORMAT_BUFFER_SIZE = 4096;
-    va_list args;
-    va_start(args, fmt);
-
-    char buf[FORMAT_BUFFER_SIZE];
-    memset(buf, 0, FORMAT_BUFFER_SIZE);
-    vsnprintf(buf, FORMAT_BUFFER_SIZE, fmt, args);
-
-    va_end(args);
-
-    return string_append(s, buf);
-}
-
-static ret_t string_append_se(string *s, const char *start, const char *end) {
-    size_t sz = end - start;
-    return da_append(_da(s), start, sz);
-}
-
-static void string_init_globals() {
-    string_init(&string_null);
-    string_append(string_null, "(null)");
-}
-
-static void string_shutdown_globals() {
-    if (string_null)
-        string_release(string_null);
-}
-
-static char *string_makez(string *s) {
-    if (!s) return NULL;
-
-    size_t sz = _da(s)->used;
-    char *data = zalloc(sz + 1);
-    memcpy(data, _da(s)->ptr, sz);
-    return data;
-}
-
-static ret_t string_appendn(string *s, const char *str, size_t len) {
-    return da_append(_da(s), str, len);
-
-}
-
-static ret_t string_create(string **s, const char *str) {
-    string_init(s);
-
-    return string_append(*s, str);
-}
-
-static ret_t string_add(string *a, string *b) {
-    return da_concant(_da(a), _da(b));
-}
-
-static ret_t string_pop_head(string *s, size_t n) {
-    return da_pop_head(_da(s), n);
-}
-
-static ret_t string_crop_tail(string *s, size_t n) {
-    return da_crop_tail(_da(s), n);
-}
-
-static size_t string_find_last_char(string *s, char ch) {
-    size_t ssize = string_size(s);
-    for (size_t i = ssize; i != 0; --i) {
-        char cur = string_char(s, i);
-        if (cur == ch)
-            return i;
-    }
-
-    return size_npos;
-
-}
-
-static ret_t string_remove_seq(string *s, size_t begin, size_t end) {
-    return da_remove(_da(s), begin, end);
-}
-
-static ret_t string_remove_dubseq(string *s, char delm, uint8_t skip) {
-    size_t j = 0;
-    while (j < string_size(s)) {
-        const char *cur = string_cdata(s);
-
-        if (cur[j] == delm) {
-            size_t begin = j;
-            size_t end = begin;
-
-            while (cur[(++end)] == delm);
-
-            //--end;// last compared position
-            size_t n = end - begin;
-
-            if (n > 1) {
-
-                size_t skip_ = 0;
-                if (skip >= n) {
-                    LOG_WARN("skip value is too high. skip=%d", skip);
-                } else {
-                    skip_ = (size_t) skip;
-                }
-
-                CHECK_RETURN(string_remove_seq(s, begin, end - skip_));
-                j = 0; // skip due to internal buffer changed
-                continue;
-            }
-        }
-
-        ++j;
-    }
-
-    return ST_OK;
-}
-
-static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
-static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
-
-static bool check_strip_dict(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
-        if (ch == strip_dict[i])
-            return true;
-
-    return false;
-}
-
-static ret_t string_rstrip(string *s) {
-
-    if (string_size(s) < 1) {
-        LOG_WARN("String size(%lu) is too small", string_size(s));
-        return return_create(ST_OUT_OF_RANGE);
-    }
-
-    size_t n = 0;
-    for (size_t j = string_size(s) - 1; j != 0; --j) {
-        char sch = string_char(s, j);
-        if (check_strip_dict(sch))
-            ++n;
-        else
-            break;
-    }
-
-    return string_pop_head(s, n);
-}
-
-static ret_t string_lstrip(string *s) {
-
-    size_t n = 0;
-    for (size_t j = 0; j < string_size(s); ++j) {
-        char sch = string_char(s, j);
-        if (check_strip_dict(sch))
-            ++n;
-        else
-            break;
-    }
-
-    return string_crop_tail(s, n);
-}
-
-static ret_t string_strip(string *s) {
-
-    if (string_size(s) < 3)
-        return ST_SIZE_EXCEED;
-
-    string_rstrip(s);
-    string_lstrip(s);
-
-    return ST_OK;
-}
-
-static bool check_strip_dict_ws(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
-        if (ch == strip_dict_ws[i])
-            return true;
-
-    return false;
-}
-
-static ret_t string_rstrip_ws(string *s) {
-    while (string_size(s) > 2) {
-
-        size_t idx = string_size(s) - 1;
-        char sch = string_char(s, idx);
-
-        if (check_strip_dict_ws(sch)) {
-            string_pop_head(s, 1);
-        } else {
-            return ST_OK;
-        }
-
-    }
-
-    return ST_OK;
-}
-
-static ret_t string_starts_with(string *s, const char *str) {
-    size_t str_len = strlen(str);
-    if (str_len > string_size(s))
-        return return_create(ST_SIZE_EXCEED);
-
-    if (memcmp(string_cdata(s), str, str_len) == 0)
-        return return_create(ST_OK);
-
-    return return_create(ST_NOT_FOUND);
-}
-
-
-static bool string_re_match(string *s, const char *pattern) {
-    regex_t re;
-    regex_compile(&re, pattern);
-
-    char *text = string_makez(s);
-    bool m = regex_match(&re, text);
-    free(text);
-    regfree(&re);
-
-    return m;
-}
-
-static ret_t string_compare(string *a, string *b) {
-    return da_compare(_da(a), _da(b));
-}
-
-static ret_t string_comparez(string *a, const char *str) {
-    size_t ssize = strlen(str);
-    if (_da(a)->used > ssize)
-        return ST_ERR;
-    else if (_da(a)->used < ssize)
-        return ST_ERR;
-    else {
-        if (memcmp(_da(a)->ptr, str, ssize) == 0)
-            return ST_OK;
-        else
-            return ST_ERR;
-    }
-}
-
-static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
-    size_t ssize = string_size(s);
-    if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
-        LOG_ERROR("Indexes are out of bound");
-        return ST_OUT_OF_RANGE;
-    }
-
-    *sb = _da(s)->ptr + beg;
-    *se = _da(s)->ptr + end;
-
-    return ST_OK;
-}
-
-static void string_map_string(string *s, char **sb, char **se) {
-    string_map_region(s, 0, string_size(s), sb, se);
-}
-
-static ret_t string_to_u64(string *s, uint64_t *ul) {
-
-    uint64_t res = 0;
-    size_t ssize = string_size(s);
-    for (size_t i = 0; i < ssize; ++i)
-        res = res * 10 + string_char(s, i) - '0';
-
-    *ul = res;
-
-    return ST_OK;
-
-}
-
-#define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
-#define string_printd(a) LOG_DEBUG("%.*s", string_size(a), string_cdata(a));
-#define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
-
-static void test_string() {
-    static const char *str1 = "Hello, World!";
-    static const char *str2 = "What's up, Dude?";
-    ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
-
-    string *a = NULL;
-    string *b = NULL;
-    string *c = NULL;
-    string *d = NULL;
-
-
-    CHECK_RETURN(string_init(&a));
-    CHECK_RETURN(string_release(a));
-    a = NULL;
-
-    CHECK_RETURN(string_create(&a, str1));
-    CHECK_RETURN(string_comparez(a, str1));
-
-    CHECK_RETURN(string_dub(a, &b));
-    ASSERT(string_compare(a, b) == 0);
-
-    CHECK_RETURN(string_append(b, str2));
-
-    string_print(b);
-
-    CHECK_RETURN(string_add(b, a));
-
-    string_printt(a);
-    string_print(b);
-
-    CHECK_RETURN(string_create(&c, "      abc\n\n\n\n\n\n\n       "));
-
-    CHECK_RETURN(string_strip(c));
-
-    string_print(c);
-
-    CHECK_RETURN(string_comparez(c, "abc"));
-
-
-    CHECK_RETURN(string_create(&d, "aabccc____3_2_1   :::"));
-    CHECK_RETURN(string_remove_dubseq(d, 'a', 0));
-    CHECK_RETURN(string_remove_dubseq(d, 'b', 0));
-    CHECK_RETURN(string_remove_dubseq(d, 'c', 0));
-    CHECK_RETURN(string_remove_dubseq(d, '_', 0));
-    CHECK_RETURN(string_remove_dubseq(d, '3', 0));
-    CHECK_RETURN(string_remove_dubseq(d, '2', 0));
-    CHECK_RETURN(string_remove_dubseq(d, '1', 0));
-    CHECK_RETURN(string_remove_dubseq(d, ' ', 0));
-    CHECK_RETURN(string_remove_dubseq(d, ':', 0));
-
-    ASSERT(string_comparez(d, "b3_2_1") == RET_OK);
-    string_print(d);
-
-
-    string_release(a);
-    string_release(b);
-    string_release(c);
-    string_release(d);
-
-}
-
-//=======================================================================
-// GENERIC FIFO
-//=======================================================================
-
-typedef struct fifo_node {
-    void *data;
-    struct fifo_node *next;
-
-} fifo_node_t;
-
-typedef struct fifo {
-    fifo_node_t *head;
-    fifo_node_t *top;
-    size_t size;
-    data_release_cb rel_cb;
-
-} fifo_t;
-
-
-static void fifo_init(fifo_t **l, data_release_cb cb) {
-    *l = zalloc(sizeof(fifo_t));
-    (*l)->rel_cb = cb;
-}
-
-static void fifo_node_init(fifo_node_t **node) {
-    *node = zalloc(sizeof(fifo_node_t));
-}
-
-static void fifo_push(fifo_t *l, void *s) {
-
-    if (!l->head) {
-        fifo_node_init(&l->head);
-
-        fifo_node_t *node = l->head;
-
-        node->data = s;
-
-        l->top = l->head;
-    } else {
-        fifo_node_t *node = NULL;
-        fifo_node_init(&node);
-        node->data = s;
-        l->top->next = node;
-
-
-        l->top = node;
-
-    }
-
-    ++l->size;
-}
-
-static void *fifo_pop(fifo_t *l) {
-    if (!l->head)
-        return NULL;
-
-    fifo_node_t *tmp = l->head;
-    l->head = tmp->next;
-    l->size--;
-
-    void *p = tmp->data;
-    safe_free(tmp);
-
-    return p;
-}
-
-static ret_t fifo_release(fifo_t *l, bool data_release) {
-
-    void *p = NULL;
-    while ((p = fifo_pop(l))) {
-        if (data_release)
-            l->rel_cb(p);
-    }
-
-    safe_free(l);
-
-
-    return RET_OK;
-
-}
-
-void test_fifo() {
-    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
-
-
-    fifo_t *f = NULL;
-    fifo_init(&f, NULL);
-
-    fifo_push(f, &ii[0]);
-    fifo_push(f, &ii[1]);
-    fifo_push(f, &ii[2]);
-    fifo_push(f, &ii[3]);
-    fifo_push(f, &ii[4]);
-    fifo_push(f, &ii[5]);
-    fifo_push(f, &ii[6]);
-    fifo_push(f, &ii[7]);
-
-
-    uint64_t *p = NULL;
-    uint64_t i = 0;
-    while ((p = (uint64_t *) fifo_pop(f))) {
-        ASSERT(ii[i++] == *p);
-        LOG_TRACE("fifo %lu", *p);
-    }
-
-
-    fifo_release(f, false);
-
-}
-
-//=======================================================================
-// GENERIC LIFO
-//=======================================================================
-
-typedef struct lifo_node {
-    void *data;
-    struct lifo_node *prev;
-
-} lifo_node_t;
-
-typedef struct lifo {
-    lifo_node_t *head;
-    size_t size;
-    data_release_cb rel_cb;
-
-} lifo_t;
-
-
-static void lifo_init(lifo_t **l, data_release_cb cb) {
-    *l = zalloc(sizeof(lifo_t));
-    (*l)->rel_cb = cb;
-}
-
-static void lifo_node_init(lifo_node_t **node) {
-    *node = zalloc(sizeof(lifo_node_t));
-}
-
-static void lifo_push(lifo_t *l, void *s) {
-
-    if (!l->head) {
-        lifo_node_init(&l->head);
-
-        lifo_node_t *node = l->head;
-
-        node->data = s;
-    } else {
-        lifo_node_t *node = NULL;
-        lifo_node_init(&node);
-        node->data = s;
-        node->prev = l->head;
-
-
-        l->head = node;
-    }
-
-    ++l->size;
-}
-
-static void *lifo_pop(lifo_t *l) {
-    if (!l->head)
-        return NULL;
-
-    lifo_node_t *tmp = l->head;
-    l->head = tmp->prev;
-    l->size--;
-
-    void *p = tmp->data;
-    safe_free(tmp);
-
-    return p;
-}
-
-static ret_t lifo_release(lifo_t *l, bool data_release) {
-
-    void *p = NULL;
-    while ((p = lifo_pop(l))) {
-        if (data_release)
-            l->rel_cb(p);
-    }
-
-    safe_free(l);
-
-
-    return RET_OK;
-
-}
-
-void test_lifo() {
-    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
-
-
-    lifo_t *f = NULL;
-    lifo_init(&f, NULL);
-
-    lifo_push(f, &ii[0]);
-    lifo_push(f, &ii[1]);
-    lifo_push(f, &ii[2]);
-    lifo_push(f, &ii[3]);
-    lifo_push(f, &ii[4]);
-    lifo_push(f, &ii[5]);
-    lifo_push(f, &ii[6]);
-    lifo_push(f, &ii[7]);
-
-
-    uint64_t *p = NULL;
-    uint64_t i = 7;
-    while ((p = (uint64_t *) lifo_pop(f))) {
-        ASSERT(ii[i--] == *p);
-        LOG_TRACE("lifo %lu", *p);
-    }
-
-
-    lifo_release(f, false);
-
-}
-
-
 //=======================================================================
 // GENERIC DOUBLE LINKED LIST
 //=======================================================================
@@ -2448,6 +1798,731 @@ void test_list() {
     ASSERT(l2 == NULL);
 }
 
+
+//=======================================================================
+// REGEX
+//=======================================================================
+
+#define MAX_ERROR_MSG 0x1000
+
+/* Compile the regular expression described by "regex_text" into
+   "r". */
+
+static ret_t regex_compile(regex_t *r, const char *pattern) {
+    int status = regcomp(r, pattern, REG_EXTENDED | REG_NEWLINE);
+    if (status != 0) {
+        char error_message[MAX_ERROR_MSG];
+        regerror(status, r, error_message, MAX_ERROR_MSG);
+
+        LOG_ERROR("Regex error compiling '%s': %s",
+                  pattern, error_message);
+        return return_create(ST_ERR);
+    }
+    return ST_OK;
+}
+
+static bool regex_match(regex_t *r, const char *text) {
+    regmatch_t m[10];
+    int nomatch = regexec(r, text, 10, m, 0);
+    if (nomatch) {
+        return false;
+    }
+
+    return true;
+}
+
+//=======================================================================
+// STRING
+//=======================================================================
+
+typedef struct {
+    union {
+        uint8_t _[sizeof(dynamic_allocator_t)];
+        dynamic_allocator_t da;
+    };
+
+} string;
+
+
+#define _da(x) ((dynamic_allocator_t*)x)
+#define _dap(x) ((dynamic_allocator_t**)x)
+
+typedef struct skey_value {
+    string *key;
+    string *value;
+} skey_value_t;
+
+static string *string_null = NULL;
+
+static ret_t string_init(string **sp) {
+    return da_init(_dap(sp));
+}
+
+static ret_t string_release(string *s) {
+    return da_release(_da(s));
+}
+
+static void string_release_cb(void *p) {
+    string_release((string *) p);
+}
+
+static const char *string_cdata(string *s) {
+    return _da(s)->ptr;
+}
+
+static size_t string_size(string *s) {
+    return _da(s)->used;
+}
+
+static char string_char(string *s, size_t idx) {
+    if (idx > string_size(s)) {
+        LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
+        return (char) -1;
+    }
+
+    return _da(s)->ptr[idx];
+}
+
+static ret_t string_create_nt(string *s, char **buff) {
+    size_t ssize = string_size(s);
+    *buff = zalloc(ssize + 1);
+    memcpy(*buff, string_cdata(s), ssize);
+
+    return ST_OK;
+}
+
+///deep copy
+static ret_t string_dub(string *s, string **ns) {
+    return da_dub(_da(s), _dap(ns));
+}
+
+static ret_t string_append(string *s, const char *str) {
+    size_t len = strlen(str);
+    return da_append(_da(s), str, len);
+
+}
+
+static ret_t string_appendf(string *s, const char *fmt, ...) {
+    static const size_t FORMAT_BUFFER_SIZE = 4096;
+    va_list args;
+    va_start(args, fmt);
+
+    char buf[FORMAT_BUFFER_SIZE];
+    memset(buf, 0, FORMAT_BUFFER_SIZE);
+    vsnprintf(buf, FORMAT_BUFFER_SIZE, fmt, args);
+
+    va_end(args);
+
+    return string_append(s, buf);
+}
+
+static ret_t string_append_se(string *s, const char *start, const char *end) {
+    size_t sz = end - start;
+    return da_append(_da(s), start, sz);
+}
+
+static void string_init_globals() {
+    string_init(&string_null);
+    string_append(string_null, "(null)");
+}
+
+static void string_shutdown_globals() {
+    if (string_null)
+        string_release(string_null);
+}
+
+static char *string_makez(string *s) {
+    if (!s) return NULL;
+
+    size_t sz = _da(s)->used;
+    char *data = zalloc(sz + 1);
+    memcpy(data, _da(s)->ptr, sz);
+    return data;
+}
+
+static ret_t string_appendn(string *s, const char *str, size_t len) {
+    return da_append(_da(s), str, len);
+
+}
+
+static ret_t string_create(string **s, const char *str) {
+    string_init(s);
+
+    return string_append(*s, str);
+}
+
+static ret_t string_add(string *a, string *b) {
+    return da_concant(_da(a), _da(b));
+}
+
+static ret_t string_pop_head(string *s, size_t n) {
+    return da_pop_head(_da(s), n);
+}
+
+static ret_t string_crop_tail(string *s, size_t n) {
+    return da_crop_tail(_da(s), n);
+}
+
+static size_t string_find_last_char(string *s, char ch) {
+    size_t ssize = string_size(s);
+    for (size_t i = ssize; i != 0; --i) {
+        char cur = string_char(s, i);
+        if (cur == ch)
+            return i;
+    }
+
+    return size_npos;
+
+}
+
+static ret_t string_remove_seq(string *s, size_t begin, size_t end) {
+    return da_remove(_da(s), begin, end);
+}
+
+static ret_t string_remove_dubseq(string *s, char delm, uint8_t skip) {
+    size_t j = 0;
+    while (j < string_size(s)) {
+        const char *cur = string_cdata(s);
+
+        if (cur[j] == delm) {
+            size_t begin = j;
+            size_t end = begin;
+
+            while (cur[(++end)] == delm);
+
+            //--end;// last compared position
+            size_t n = end - begin;
+
+            if (n > 1) {
+
+                size_t skip_ = 0;
+                if (skip >= n) {
+                    LOG_WARN("skip value is too high. skip=%d", skip);
+                } else {
+                    skip_ = (size_t) skip;
+                }
+
+                CHECK_RETURN(string_remove_seq(s, begin, end - skip_));
+                j = 0; // skip due to internal buffer changed
+                continue;
+            }
+        }
+
+        ++j;
+    }
+
+    return ST_OK;
+}
+
+static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
+static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
+
+static bool check_strip_dict(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
+        if (ch == strip_dict[i])
+            return true;
+
+    return false;
+}
+
+static ret_t string_rstrip(string *s) {
+
+    if (string_size(s) < 1) {
+        LOG_WARN("String size(%lu) is too small", string_size(s));
+        return return_create(ST_OUT_OF_RANGE);
+    }
+
+    size_t n = 0;
+    for (size_t j = string_size(s) - 1; j != 0; --j) {
+        char sch = string_char(s, j);
+        if (check_strip_dict(sch))
+            ++n;
+        else
+            break;
+    }
+
+    return string_pop_head(s, n);
+}
+
+static ret_t string_lstrip(string *s) {
+
+    size_t n = 0;
+    for (size_t j = 0; j < string_size(s); ++j) {
+        char sch = string_char(s, j);
+        if (check_strip_dict(sch))
+            ++n;
+        else
+            break;
+    }
+
+    return string_crop_tail(s, n);
+}
+
+static ret_t string_strip(string *s) {
+
+    if (string_size(s) < 3)
+        return ST_SIZE_EXCEED;
+
+    string_rstrip(s);
+    string_lstrip(s);
+
+    return ST_OK;
+}
+
+static bool check_strip_dict_ws(char ch) {
+    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
+        if (ch == strip_dict_ws[i])
+            return true;
+
+    return false;
+}
+
+static ret_t string_rstrip_ws(string *s) {
+    while (string_size(s) > 2) {
+
+        size_t idx = string_size(s) - 1;
+        char sch = string_char(s, idx);
+
+        if (check_strip_dict_ws(sch)) {
+            string_pop_head(s, 1);
+        } else {
+            return ST_OK;
+        }
+
+    }
+
+    return ST_OK;
+}
+
+static ret_t string_starts_with(string *s, const char *str) {
+    size_t str_len = strlen(str);
+    if (str_len > string_size(s))
+        return return_create(ST_SIZE_EXCEED);
+
+    if (memcmp(string_cdata(s), str, str_len) == 0)
+        return return_create(ST_OK);
+
+    return return_create(ST_NOT_FOUND);
+}
+
+
+static bool string_re_match(string *s, const char *pattern) {
+    regex_t re;
+    regex_compile(&re, pattern);
+
+    char *text = string_makez(s);
+    bool m = regex_match(&re, text);
+    free(text);
+    regfree(&re);
+
+    return m;
+}
+
+static ret_t string_compare(string *a, string *b) {
+    return da_compare(_da(a), _da(b));
+}
+
+static ret_t string_comparez(string *a, const char *str) {
+    size_t ssize = strlen(str);
+    if (_da(a)->used > ssize)
+        return ST_ERR;
+    else if (_da(a)->used < ssize)
+        return ST_ERR;
+    else {
+        if (memcmp(_da(a)->ptr, str, ssize) == 0)
+            return ST_OK;
+        else
+            return ST_ERR;
+    }
+}
+
+static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
+    size_t ssize = string_size(s);
+    if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
+        LOG_ERROR("Indexes are out of bound");
+        return ST_OUT_OF_RANGE;
+    }
+
+    *sb = _da(s)->ptr + beg;
+    *se = _da(s)->ptr + end;
+
+    return ST_OK;
+}
+
+static void string_map_string(string *s, char **sb, char **se) {
+    string_map_region(s, 0, string_size(s), sb, se);
+}
+
+static ret_t string_to_u64(string *s, uint64_t *ul) {
+
+    uint64_t res = 0;
+    size_t ssize = string_size(s);
+    for (size_t i = 0; i < ssize; ++i)
+        res = res * 10 + string_char(s, i) - '0';
+
+    *ul = res;
+
+    return ST_OK;
+
+}
+
+typedef struct string_pair {
+    string *first;
+    string *second;
+} string_pair_t;
+
+void string_pair_release_cb(void *p) {
+    if (!p) return;
+
+    string_pair_t *pair = (string_pair_t *) p;
+
+    if (pair->first) string_release(pair->first);
+    if (pair->second) string_release(pair->second);
+
+    free(pair);
+}
+
+static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
+    regex_t re;
+    ret_t ret;
+    if ((ret = regex_compile(&re, pattern)) != RET_OK) {
+        return ret;
+    }
+
+    list_init(pairs, &string_release_cb);
+
+
+
+    const char *tkp = _da(s)->ptr;
+    const char *p = _da(s)->ptr;
+    /* "N_matches" is the maximum number of matches allowed. */
+    const int n_matches = 10;
+    /* "M" contains the matches found. */
+    regmatch_t m[n_matches];
+
+
+    while(1) {
+        m[0].rm_so = 0;
+        m[0].rm_eo = string_size(s) - (p - tkp);
+        int nomatch = regexec(&re, p, n_matches, m, REG_STARTEND);
+        if (nomatch) {
+            LOG_INFO("No more matches.");
+            break;
+        } else {
+
+            for (int i = 0; i < n_matches; i++) {
+                int start;
+                int finish;
+                if (m[i].rm_so == -1) {
+                    break;
+                }
+
+                start = m[i].rm_so + (p - tkp);
+                finish = m[i].rm_eo+ (p - tkp);
+                if (i == 0) {
+                    continue;
+                }
+                else
+                {
+                    string* val;
+                    string_init(&val);
+                    string_appendn(val, tkp + start, (finish - start));
+
+                    list_push(*pairs, val);
+                }
+            }
+
+            p+= m[0].rm_eo;
+
+        }
+    }
+
+    regfree(&re);
+
+    return return_create(ST_OK);
+
+}
+
+#define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
+#define string_printd(a) LOG_DEBUG("%.*s", string_size(a), string_cdata(a));
+#define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
+
+static void test_string() {
+    static const char *str1 = "Hello, World!";
+    static const char *str2 = "What's up, Dude?";
+    ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
+
+    string *a = NULL;
+    string *b = NULL;
+    string *c = NULL;
+    string *d = NULL;
+
+
+    CHECK_RETURN(string_init(&a));
+    CHECK_RETURN(string_release(a));
+    a = NULL;
+
+    CHECK_RETURN(string_create(&a, str1));
+    CHECK_RETURN(string_comparez(a, str1));
+
+    CHECK_RETURN(string_dub(a, &b));
+    ASSERT(string_compare(a, b) == 0);
+
+    CHECK_RETURN(string_append(b, str2));
+
+    string_print(b);
+
+    CHECK_RETURN(string_add(b, a));
+
+    string_printt(a);
+    string_print(b);
+
+    CHECK_RETURN(string_create(&c, "      abc\n\n\n\n\n\n\n       "));
+
+    CHECK_RETURN(string_strip(c));
+
+    string_print(c);
+
+    CHECK_RETURN(string_comparez(c, "abc"));
+
+
+    CHECK_RETURN(string_create(&d, "aabccc____3_2_1   :::"));
+    CHECK_RETURN(string_remove_dubseq(d, 'a', 0));
+    CHECK_RETURN(string_remove_dubseq(d, 'b', 0));
+    CHECK_RETURN(string_remove_dubseq(d, 'c', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '_', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '3', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '2', 0));
+    CHECK_RETURN(string_remove_dubseq(d, '1', 0));
+    CHECK_RETURN(string_remove_dubseq(d, ' ', 0));
+    CHECK_RETURN(string_remove_dubseq(d, ':', 0));
+
+    ASSERT(string_comparez(d, "b3_2_1") == RET_OK);
+    string_print(d);
+
+
+    string_release(a);
+    string_release(b);
+    string_release(c);
+    string_release(d);
+
+}
+
+//=======================================================================
+// GENERIC FIFO
+//=======================================================================
+
+typedef struct fifo_node {
+    void *data;
+    struct fifo_node *next;
+
+} fifo_node_t;
+
+typedef struct fifo {
+    fifo_node_t *head;
+    fifo_node_t *top;
+    size_t size;
+    data_release_cb rel_cb;
+
+} fifo_t;
+
+
+static void fifo_init(fifo_t **l, data_release_cb cb) {
+    *l = zalloc(sizeof(fifo_t));
+    (*l)->rel_cb = cb;
+}
+
+static void fifo_node_init(fifo_node_t **node) {
+    *node = zalloc(sizeof(fifo_node_t));
+}
+
+static void fifo_push(fifo_t *l, void *s) {
+
+    if (!l->head) {
+        fifo_node_init(&l->head);
+
+        fifo_node_t *node = l->head;
+
+        node->data = s;
+
+        l->top = l->head;
+    } else {
+        fifo_node_t *node = NULL;
+        fifo_node_init(&node);
+        node->data = s;
+        l->top->next = node;
+
+
+        l->top = node;
+
+    }
+
+    ++l->size;
+}
+
+static void *fifo_pop(fifo_t *l) {
+    if (!l->head)
+        return NULL;
+
+    fifo_node_t *tmp = l->head;
+    l->head = tmp->next;
+    l->size--;
+
+    void *p = tmp->data;
+    safe_free(tmp);
+
+    return p;
+}
+
+static ret_t fifo_release(fifo_t *l, bool data_release) {
+
+    void *p = NULL;
+    while ((p = fifo_pop(l))) {
+        if (data_release)
+            l->rel_cb(p);
+    }
+
+    safe_free(l);
+
+
+    return RET_OK;
+
+}
+
+void test_fifo() {
+    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
+
+
+    fifo_t *f = NULL;
+    fifo_init(&f, NULL);
+
+    fifo_push(f, &ii[0]);
+    fifo_push(f, &ii[1]);
+    fifo_push(f, &ii[2]);
+    fifo_push(f, &ii[3]);
+    fifo_push(f, &ii[4]);
+    fifo_push(f, &ii[5]);
+    fifo_push(f, &ii[6]);
+    fifo_push(f, &ii[7]);
+
+
+    uint64_t *p = NULL;
+    uint64_t i = 0;
+    while ((p = (uint64_t *) fifo_pop(f))) {
+        ASSERT(ii[i++] == *p);
+        LOG_TRACE("fifo %lu", *p);
+    }
+
+
+    fifo_release(f, false);
+
+}
+
+//=======================================================================
+// GENERIC LIFO
+//=======================================================================
+
+typedef struct lifo_node {
+    void *data;
+    struct lifo_node *prev;
+
+} lifo_node_t;
+
+typedef struct lifo {
+    lifo_node_t *head;
+    size_t size;
+    data_release_cb rel_cb;
+
+} lifo_t;
+
+
+static void lifo_init(lifo_t **l, data_release_cb cb) {
+    *l = zalloc(sizeof(lifo_t));
+    (*l)->rel_cb = cb;
+}
+
+static void lifo_node_init(lifo_node_t **node) {
+    *node = zalloc(sizeof(lifo_node_t));
+}
+
+static void lifo_push(lifo_t *l, void *s) {
+
+    if (!l->head) {
+        lifo_node_init(&l->head);
+
+        lifo_node_t *node = l->head;
+
+        node->data = s;
+    } else {
+        lifo_node_t *node = NULL;
+        lifo_node_init(&node);
+        node->data = s;
+        node->prev = l->head;
+
+
+        l->head = node;
+    }
+
+    ++l->size;
+}
+
+static void *lifo_pop(lifo_t *l) {
+    if (!l->head)
+        return NULL;
+
+    lifo_node_t *tmp = l->head;
+    l->head = tmp->prev;
+    l->size--;
+
+    void *p = tmp->data;
+    safe_free(tmp);
+
+    return p;
+}
+
+static ret_t lifo_release(lifo_t *l, bool data_release) {
+
+    void *p = NULL;
+    while ((p = lifo_pop(l))) {
+        if (data_release)
+            l->rel_cb(p);
+    }
+
+    safe_free(l);
+
+
+    return RET_OK;
+
+}
+
+void test_lifo() {
+    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
+
+
+    lifo_t *f = NULL;
+    lifo_init(&f, NULL);
+
+    lifo_push(f, &ii[0]);
+    lifo_push(f, &ii[1]);
+    lifo_push(f, &ii[2]);
+    lifo_push(f, &ii[3]);
+    lifo_push(f, &ii[4]);
+    lifo_push(f, &ii[5]);
+    lifo_push(f, &ii[6]);
+    lifo_push(f, &ii[7]);
+
+
+    uint64_t *p = NULL;
+    uint64_t i = 7;
+    while ((p = (uint64_t *) lifo_pop(f))) {
+        ASSERT(ii[i--] == *p);
+        LOG_TRACE("lifo %lu", *p);
+    }
+
+
+    lifo_release(f, false);
+
+}
 
 //=======================================================================
 // SLIST
@@ -3201,6 +3276,23 @@ static void file_read_all_s(const char *filename, string *s) {
     fclose(f);
 }
 
+static int file_read_all_buffered_s(const char *filename, string *s) {
+#define FILE_READ_ALL_BUFF_SIZE 1024
+    FILE *f = fopen(filename, "rb");
+    if (!f) return -1;
+
+    char buff[FILE_READ_ALL_BUFF_SIZE] = {0};
+    da_realloc(_da(s), FILE_READ_ALL_BUFF_SIZE);
+
+    while (fgets(buff, FILE_READ_ALL_BUFF_SIZE, f))
+        string_append(s, buff);
+
+    fclose(f);
+
+    return 0;
+#undef FILE_READ_ALL_BUFF_SIZE
+}
+
 static void file_read_line(const char *filename, string *s) {
     FILE *f = fopen(filename, "rb");
 
@@ -3211,6 +3303,7 @@ static void file_read_line(const char *filename, string *s) {
 
     string_append(s, buff);
 
+    free(buff);
     fclose(f);
 }
 
@@ -4146,6 +4239,7 @@ static void cpu_dev_get(cpu_dev_t **cpu_dev) {
 
     list_t *cpu_stats = NULL;
     string_split(stat_s, ' ', &cpu_stats);
+    string_release(stat_s);
 
     list_iter_t *stat_it = NULL;
     list_iter_init(cpu_stats, &stat_it);
@@ -4175,20 +4269,6 @@ static void cpu_dev_get(cpu_dev_t **cpu_dev) {
 }
 
 
-static void cpu_dev_diff(cpu_dev_t *a, cpu_dev_t *b) {
-    b->user = b->user - a->user;
-    b->nice = b->nice - a->nice;
-    b->system = b->system - a->system;
-    b->idle = b->idle - a->idle;
-    b->iowait = b->iowait - a->iowait;
-    b->irc = b->irc - a->irc;
-    b->softirc = b->softirc - a->softirc;
-    b->steal = b->steal - a->steal;
-    b->guest = b->guest - a->guest;
-    b->guest_nice = b->guest_nice - a->guest_nice;
-
-}
-
 static double cpu_dev_diff_usage(cpu_dev_t *a, cpu_dev_t *b) {
 
     uint64_t prev_idle = a->idle + a->iowait;
@@ -4208,9 +4288,160 @@ static double cpu_dev_diff_usage(cpu_dev_t *a, cpu_dev_t *b) {
     return usage;
 }
 
+typedef struct cpu_info {
+    string *name;
+    string *clock;
+    uint64_t cores;
+} cpu_info_t;
 
-static double cpu_dev_usage(cpu_dev_t *cpu, double sample_rate) {
-    return (double) (cpu->nice + cpu->idle) * (100.0 / sample_rate) / (double) (cpu->nice + cpu->idle + cpu->iowait);
+static void cpu_info_release_cb(void *p) {
+    if (!p) return;
+
+    cpu_info_t *cpui = (cpu_info_t *) p;
+
+    if (cpui->name) string_release(cpui->name);
+    if (cpui->clock) string_release(cpui->clock);
+
+    free(cpui);
+}
+
+static void cpu_info_get(cpu_info_t **cpu_info) {
+    *cpu_info = zalloc(sizeof(cpu_info_t));
+    cpu_info_t *cpu = *cpu_info;
+    string *info_s = NULL;
+    string_init(&info_s);
+
+    file_read_all_buffered_s("/proc/cpuinfo", info_s);
+
+    list_t *lines = NULL;
+    string_split(info_s, '\n', &lines);
+
+
+    list_iter_t *lines_it = NULL;
+    list_iter_init(lines, &lines_it);
+
+
+    string *line;
+    uint64_t n_cpu = 0;
+    while ((line = list_iter_next(lines_it))) {
+        if (string_starts_with(line, "model name") == RET_OK) {
+            if (n_cpu > 0) continue;
+            string_crop_tail(line, strlen("model name\t:"));
+            string_strip(line);
+            string_dub(line, &cpu->name);
+        }
+
+        if (string_starts_with(line, "cpu MHz") == RET_OK) {
+            if (n_cpu++ > 0) continue;
+            string_crop_tail(line, strlen("cpu MHz\t: "));
+            string_strip(line);
+            string_dub(line, &cpu->clock);
+        }
+
+    }
+
+    cpu->cores = n_cpu;
+
+
+    list_iter_release(lines_it);
+    list_release(lines, true);
+    string_release(info_s);
+}
+
+
+//===============================================================================
+// MEMORY
+//===============================================================================
+
+typedef struct mem_info
+{
+    uint64_t mem_total; //Total usable memory
+    uint64_t mem_free;  //The amount of physical memory not used by the system
+    uint64_t mem_avail; //An estimate of how much memory is available for starting new applications, without swapping.
+    uint64_t cached;    //Memory in the pagecache (Diskcache and Shared Memory)
+    uint64_t swap_cached;//Memory that is present within main memory, but also in the swapfile. (If memory is needed this area does not need to be swapped out AGAIN because it is already in the swapfile. This saves I/O and increases performance if machine runs short on memory.)
+    uint64_t swap_total;
+    uint64_t swap_free;
+}mem_info_t;
+
+static void mem_info_release_cb(void* p)
+{
+    if(!p) return;
+
+    mem_info_t* mem = (mem_info_t*)p;
+
+    free(mem);
+}
+
+
+static void mem_info_get(mem_info_t** mem_info)
+{
+    *mem_info = zalloc(sizeof(mem_info_t));
+    mem_info_t* m = *mem_info;
+
+    string* mem_info_s = NULL;
+    string_init(&mem_info_s);
+    file_read_all_buffered_s("/proc/meminfo", mem_info_s);
+
+
+    list_t* pairs = NULL;
+
+    string_re_search(mem_info_s, "([a-zA-Z]+):\\s+([0-9]+)", &pairs);
+
+    string_release(mem_info_s);
+
+    uint64_t i = 0;
+
+    while(i < pairs->size) {
+        ++i;
+        string* key = (string*)list_pop_head(pairs);
+        string* val = (string*)list_pop_head(pairs);
+
+        if(string_comparez(key, "MemTotal") == ST_OK)
+        {
+            string_to_u64(val, &m->mem_total);
+            m->mem_total *= 1024;
+        }
+        else if(string_comparez(key, "MemFree") == ST_OK)
+        {
+            string_to_u64(val, &m->mem_free);
+            m->mem_free *= 1024;
+        }
+        else if(string_comparez(key, "MemAvailable") == ST_OK)
+        {
+            string_to_u64(val, &m->mem_avail);
+            m->mem_avail *= 1024;
+        }
+        else if(string_comparez(key, "Cached") == ST_OK)
+        {
+            string_to_u64(val, &m->cached);
+            m->cached *= 1024;
+        }
+        else if(string_comparez(key, "SwapCached") == ST_OK)
+        {
+            string_to_u64(val, &m->swap_cached);
+            m->swap_cached *= 1024;
+        }
+        else if(string_comparez(key, "SwapTotal") == ST_OK)
+        {
+            string_to_u64(val, &m->swap_total);
+            m->swap_total *= 1024;
+        }
+        else if(string_comparez(key, "SwapFree") == ST_OK)
+        {
+            string_to_u64(val, &m->swap_free);
+            m->swap_free *= 1024;
+
+            string_release(key);
+            string_release(val);
+            break;
+        }
+
+        string_release(key);
+        string_release(val);
+    }
+
+    list_release(pairs, true);
 }
 
 //===============================================================================
@@ -4244,10 +4475,17 @@ static pthread_mutex_t ldevices_mtx;
 static list_t *lnet_devs = NULL;
 static pthread_mutex_t lnet_devs_mtx;
 
+static cpu_info_t *g_cpu_info = NULL;
+static pthread_mutex_t cpu_info_mtx;
+
+static mem_info_t *g_mem_info = NULL;
+static pthread_mutex_t mem_info_mtx;
+
 static atomic_bool programm_exit = false;
 static atomic_ulong sample_rate_mul = 10;
 static atomic_ulong cpu_usage = 0;
 
+static uint64_t g_nframe = 0;
 
 static inline double device_get_sample_rate() {
     return DEVICE_BASE_SAMPLE_RATE * atomic_load(&sample_rate_mul);
@@ -4383,8 +4621,9 @@ static const char *animation_bug() {
         return movie[frame--];
 }
 
-
-static void ncurses_cpu_bar_render(int row, int col) {
+//@progress - 0-50
+static void ncurses_bar_render(int row, int col, int64_t progress)
+{
     const char *lit = "❯";
 
     string *gs = NULL;
@@ -4394,18 +4633,15 @@ static void ncurses_cpu_bar_render(int row, int col) {
     string *rs = NULL;
     string_init(&rs);
 
-    ulong cpus = atomic_load(&cpu_usage);
-    int64_t cu = (int64_t) cpus / 2;
-
-    for (int64_t i = 0; i < MIN(cu, 30); ++i) {
+    for (int64_t i = 0; i < MIN(progress, 30); ++i) {
         string_append(gs, lit);
     }
 
-    for (int64_t i = 0; i < MIN(cu - 30, 15); ++i) {
+    for (int64_t i = 0; i < MIN(progress - 30, 15); ++i) {
         string_append(ys, lit);
     }
 
-    for (int64_t i = 0; i < MIN(cu - 45, 5); ++i) {
+    for (int64_t i = 0; i < MIN(progress - 45, 5); ++i) {
         string_append(rs, lit);
     }
 
@@ -4418,26 +4654,50 @@ static void ncurses_cpu_bar_render(int row, int col) {
     char *rbar = string_makez(rs);
     string_release(rs);
 
-    mvaddstr(row, 1, "[");
+    mvaddstr(row, col, "[");
     attron(COLOR_PAIR(2));
-    mvaddstr(row, 2, gbar);
+    mvaddstr(row, col+1, gbar);
     attroff(COLOR_PAIR(2));
     attron(COLOR_PAIR(4));
-    mvaddstr(row, 32, ybar);
+    mvaddstr(row, col+31, ybar);
     attroff(COLOR_PAIR(4));
     attron(COLOR_PAIR(5));
-    mvaddstr(row, 47, rbar);
+    mvaddstr(row, col+46, rbar);
     attroff(COLOR_PAIR(5));
 
-    char load_s[32];
-    sprintf(load_s, "] %lu%% CPU", cpus);
-    mvaddstr(row, 52, load_s);
+    mvaddstr(row, col + 51, "]");
 
     free(gbar);
     free(ybar);
     free(rbar);
 }
 
+static void ncurses_cpu_bar_render(int row, int col) {
+
+    ulong cpus = atomic_load(&cpu_usage);
+    int64_t cu = (int64_t) cpus / 2;
+
+    ncurses_bar_render(row, col, cu);
+
+    char load_s[32];
+    sprintf(load_s, "%02lu%% CPU", cpus);
+    mvaddstr(row, col + 53, load_s);
+
+}
+
+
+void ncurses_addstrf(int row, int col, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    char buf[2048];
+    memset(buf, 0, 2048);
+    vsnprintf(buf, 2048, fmt, args);
+
+    va_end(args);
+
+    mvaddstr(row, col, buf);
+}
 
 void ncurses_window() {
     initscr();            /* Start curses mode 		  */
@@ -4455,6 +4715,7 @@ void ncurses_window() {
 
     pthread_t keypad__thrd;
     pthread_create(&keypad__thrd, NULL, &ncurses_keypad, NULL);
+    pthread_setname_np(keypad__thrd, "keypad");
     pthread_detach(keypad__thrd);
 
     init_pair(1, COLOR_WHITE, COLOR_BLACK);
@@ -4467,7 +4728,7 @@ void ncurses_window() {
     ulong scr_upd = 1000000 / frame_rate;
     while (!atomic_load(&programm_exit)) {
         int row = 1;
-
+        ++g_nframe;
 
         clear();
 
@@ -4493,13 +4754,25 @@ void ncurses_window() {
         mvaddstr(row++, 1, fps_s);
 
         row++;
+        mvaddstr(row++, 1,
+                 "_______________________________________________________________________________________________");
+        row++;
 
-        mvaddstr(row++, 1,
-                 "===============================================================================================");
-        mvaddstr(row++, 1,
-                 "--------------------------------------------CPU------------------------------------------------");
-        mvaddstr(row++, 1,
-                 "===============================================================================================");
+        pthread_mutex_lock(&cpu_info_mtx);
+
+        if (g_cpu_info) {
+
+            char *cpu_name = string_makez(g_cpu_info->name);
+            char *cpu_clock = string_makez(g_cpu_info->clock);
+
+            ncurses_addstrf(row++, 1, "%dx %s (%s MHz)", g_cpu_info->cores, cpu_name, cpu_clock);
+
+            free(cpu_clock);
+            free(cpu_name);
+        }
+
+        pthread_mutex_unlock(&cpu_info_mtx);
+
 
         row++;
 
@@ -4507,14 +4780,38 @@ void ncurses_window() {
         ncurses_cpu_bar_render(row++, 1);
         attron(COLOR_PAIR(1));
 
-        row++;
+
+
+        pthread_mutex_lock(&mem_info_mtx);
+
+        if (g_mem_info) {
+
+            double mem_load_perc = 100.0 - g_mem_info->mem_free/(double)g_mem_info->mem_total * 100.0;
+            int64_t mem_load = (int64_t)(mem_load_perc/2.0);
+
+            ncurses_bar_render(row, 1, mem_load);
+            uint64_t mem_total = g_mem_info->mem_total/1024/1024;
+            uint64_t mem_used = (g_mem_info->mem_total - g_mem_info->mem_free)/1024/1024;
+            char load_s[64];
+            sprintf(load_s, "%02lu%% Memory [%lu/%lu Mb]", (ulong)mem_load_perc, mem_used, mem_total);
+            mvaddstr(row++, 54, load_s);
+
+            double swap_load_perc = 100.0 - g_mem_info->swap_free/(double)g_mem_info->swap_total * 100.0;
+            int64_t swap_load = (int64_t)(swap_load_perc/2.0);
+
+            ncurses_bar_render(row, 1, swap_load);
+            uint64_t swap_total = g_mem_info->swap_total/1024/1024;
+            uint64_t swap_used = (g_mem_info->swap_total - g_mem_info->swap_free)/1024/1024;
+            char sload_s[64];
+            sprintf(sload_s, "%02lu%% Swap   [%lu/%lu Mb]", (ulong)swap_load_perc, swap_used, swap_total);
+            mvaddstr(row++, 54, sload_s);
+
+        }
+
+        pthread_mutex_unlock(&mem_info_mtx);
 
         mvaddstr(row++, 1,
-                 "===============================================================================================");
-        mvaddstr(row++, 1,
-                 "---------------------------------------BLOCK DEVICES-------------------------------------------");
-        mvaddstr(row++, 1,
-                 "===============================================================================================");
+                 "_______________________________________________________________________________________________");
 
         mvaddstr(++row, COLON_DEVICE, "Device");
         mvaddstr(row, COLON_READ, "Read");
@@ -4529,80 +4826,67 @@ void ncurses_window() {
         attroff(COLOR_PAIR(1));
 
 
+        attroff(A_BOLD);
         pthread_mutex_lock(&ldevices_mtx);
 
-        if (ldevices == NULL) {
-            pthread_mutex_unlock(&ldevices_mtx);
+        if (ldevices) {
 
 
-            usleep(100000);
+            list_iter_t *it = NULL;
+            list_iter_init(ldevices, &it);
+            blk_dev_t *dev = NULL;
+            while ((dev = list_iter_next(it))) {
+                attron(COLOR_PAIR(3));
 
-            pthread_mutex_lock(&ldevices_mtx);
-            if (ldevices == NULL) {
+                char *name = string_makez(dev->name);
+                //char *syspath = string_makez(dev->sysfolder);
+                char *fs = string_makez(dev->fs);
+                char *model = string_makez(dev->model);
+                char *mount = string_makez(dev->mount);
+                //char *uuid = string_makez(dev->uuid);
+                //char *label = string_makez(dev->label);
+                char *shed = string_makez(dev->shed);
+                char *read = string_makez(dev->perf_read);
+                char *write = string_makez(dev->perf_write);
 
-                pthread_mutex_unlock(&ldevices_mtx);
-                continue;
+                char perc[32] = {0};
+                sprintf(perc, "%04.1f%%", dev->perc);
+
+                mvaddstr(row, COLON_DEVICE, name);
+                mvaddstr(row, COLON_READ, read);
+                mvaddstr(row, COLON_WRITE, write);
+                ncruses_print_hr(row, COLON_SIZE, dev->size);
+                ncruses_print_hr(row, COLON_USE, dev->used);
+                mvaddstr(row, COLON_PERC, perc);
+                mvaddstr(row, COLON_FILESYSTEM, fs);
+                mvaddstr(row, COLON_SCHED, shed);
+                mvaddstr(row, COLON_MOUNT, mount);
+                mvaddstr(row++, COLON_MODEL, model);
+
+                free(write);
+                free(read);
+                free(shed);
+                //free(label);
+                //free(uuid);
+                free(mount);
+                free(model);
+                free(fs);
+                //free(syspath);
+                free(name);
+
+                attroff(COLOR_PAIR(3));
             }
 
+            list_iter_release(it);
         }
-
-
-        list_iter_t *it = NULL;
-        list_iter_init(ldevices, &it);
-        blk_dev_t *dev = NULL;
-        while ((dev = list_iter_next(it))) {
-            attron(COLOR_PAIR(2));
-
-            char *name = string_makez(dev->name);
-            char *syspath = string_makez(dev->sysfolder);
-            char *fs = string_makez(dev->fs);
-            char *model = string_makez(dev->model);
-            char *mount = string_makez(dev->mount);
-            char *uuid = string_makez(dev->uuid);
-            char *label = string_makez(dev->label);
-            char *shed = string_makez(dev->shed);
-            char *read = string_makez(dev->perf_read);
-            char *write = string_makez(dev->perf_write);
-
-            char perc[32] = {0};
-            sprintf(perc, "%04.1f%%", dev->perc);
-
-            mvaddstr(row, COLON_DEVICE, name);
-            mvaddstr(row, COLON_READ, read);
-            mvaddstr(row, COLON_WRITE, write);
-            ncruses_print_hr(row, COLON_SIZE, dev->size);
-            ncruses_print_hr(row, COLON_USE, dev->used);
-            mvaddstr(row, COLON_PERC, perc);
-            mvaddstr(row, COLON_FILESYSTEM, fs);
-            mvaddstr(row, COLON_SCHED, shed);
-            mvaddstr(row, COLON_MOUNT, mount);
-            mvaddstr(row++, COLON_MODEL, model);
-
-            free(write);
-            free(read);
-            free(shed);
-            free(label);
-            free(uuid);
-            free(mount);
-            free(model);
-            free(fs);
-            free(syspath);
-            free(name);
-
-            attroff(COLOR_PAIR(2));
-        }
-
-        list_iter_release(it);
 
         pthread_mutex_unlock(&ldevices_mtx);
 
+        attron(A_BOLD);
+
         row++;
         mvaddstr(row++, 1,
-                 "===============================================================================================");
-        mvaddstr(row++, 1,
-                 "----------------------------------------NET DEVICES--------------------------------------------");
-        mvaddstr(row++, 1,
-                 "===============================================================================================");
+                 "_______________________________________________________________________________________________");
         mvaddstr(++row, COLON_NET_NAME, "Device");
         mvaddstr(row, COLON_NET_READ, "RX");
         mvaddstr(row, COLON_NET_WRITE, "TX");
@@ -4610,14 +4894,16 @@ void ncurses_window() {
         mvaddstr(row, COLON_NET_SPEED, "Speed");
         mvaddstr(row, COLON_NET_PERC, "%");
 
+        attroff(A_BOLD);
         pthread_mutex_lock(&lnet_devs_mtx);
 
         if (lnet_devs) {
 
+            list_iter_t* it = NULL;
             list_iter_init(lnet_devs, &it);
             net_dev_t *ndev = NULL;
             while ((ndev = list_iter_next(it))) {
-                attron(COLOR_PAIR(2));
+                attron(COLOR_PAIR(3));
 
                 char *name = string_makez(ndev->name);
                 char *read = string_makez(ndev->rx_speed);
@@ -4642,7 +4928,7 @@ void ncurses_window() {
                 free(read);
                 free(name);
 
-                attroff(COLOR_PAIR(2));
+                attroff(COLOR_PAIR(3));
             }
 
             list_iter_release(it);
@@ -4969,11 +5255,21 @@ static void cpu_dev_sample(double sample_size_sec) {
     cpu_dev_t *cpu_a = NULL;
     cpu_dev_t *cpu_b = NULL;
 
+    pthread_mutex_lock(&cpu_info_mtx);
+
+    if (g_cpu_info) {
+        cpu_info_release_cb(g_cpu_info);
+        g_cpu_info = NULL;
+    }
+
+    cpu_info_get(&g_cpu_info);
+
+    pthread_mutex_unlock(&cpu_info_mtx);
+
     cpu_dev_get(&cpu_a);
 
     __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
     usleep(ustime);
-
 
     cpu_dev_get(&cpu_b);
 
@@ -4981,6 +5277,9 @@ static void cpu_dev_sample(double sample_size_sec) {
     double usage = cpu_dev_diff_usage(cpu_a, cpu_b) * 100.0;
 
     atomic_store(&cpu_usage, (ulong) usage);
+
+    cpu_dev_release_cb(cpu_a);
+    cpu_dev_release_cb(cpu_b);
 }
 
 void *start_cpu_dev_sample(void *p) {
@@ -4995,18 +5294,49 @@ void *start_cpu_dev_sample(void *p) {
 
     return p;
 }
+
+//===============================================================================
+// MEM INFO SAMPLING
+//===============================================================================
+static void mem_info_sample(double sample_size_sec) {
+
+    pthread_mutex_lock(&mem_info_mtx);
+
+    if (g_mem_info) {
+        mem_info_release_cb(g_mem_info);
+        g_mem_info = NULL;
+    }
+
+    mem_info_get(&g_mem_info);
+
+    pthread_mutex_unlock(&mem_info_mtx);
+
+
+    __useconds_t ustime = (__useconds_t) (sample_size_sec * 1000000.0);
+    usleep(ustime);
+}
+
+void *start_mem_info_sample(void *p) {
+    while (!atomic_load(&programm_exit)) {
+        double sample_rate = device_get_sample_rate();
+#ifndef NDEBUG
+        mem_info_sample(sample_rate);
+#else
+        mem_info_sample(sample_rate);
+#endif
+    }
+
+    return p;
+}
+
 //===============================================================================
 // Misc
 //===============================================================================
 
 void sig_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
-        LOG_ERROR("Stopping the programm");
-
-        // needed be an atomic
         atomic_store(&programm_exit, true);
     }
-
 }
 
 //=======================================================================================
@@ -5022,7 +5352,7 @@ int main() {
     }
 
 #ifdef ENABLE_LOGGING
-    log_init(LOGLEVEL_NONE, "HWMonitor.log");
+    log_init(LOGLEVEL_WARN, "HWMonitor.log");
 #endif
 
     init_gloabls();
@@ -5033,16 +5363,27 @@ int main() {
 #endif
 
     pthread_mutex_init(&ldevices_mtx, NULL);
+    pthread_mutex_init(&lnet_devs_mtx, NULL);
+    pthread_mutex_init(&cpu_info_mtx, NULL);
+    pthread_mutex_init(&mem_info_mtx, NULL);
 
     pthread_t t;
+
     pthread_create(&t, NULL, &start_device_sample, NULL);
+    pthread_setname_np(t, "device_sample");
 
 
     pthread_t net_dev_t;
     pthread_create(&net_dev_t, NULL, &start_net_dev_sample, NULL);
+    pthread_setname_np(net_dev_t, "netdev_sample");
 
     pthread_t cpu_dev_t;
     pthread_create(&cpu_dev_t, NULL, &start_cpu_dev_sample, NULL);
+    pthread_setname_np(cpu_dev_t, "cpudev_sample");
+
+    pthread_t mem_info_thr;
+    pthread_create(&mem_info_thr, NULL, &start_mem_info_sample, NULL);
+    pthread_setname_np(mem_info_thr, "meminfo_sample");
 
     signal(SIGINT, &sig_handler);
     signal(SIGTERM, &sig_handler);
@@ -5053,7 +5394,15 @@ int main() {
     pthread_join(t, NULL);
     pthread_join(net_dev_t, NULL);
     pthread_join(cpu_dev_t, NULL);
+    pthread_join(mem_info_thr, NULL);
+
+    pthread_mutex_destroy(&ldevices_mtx);
+    pthread_mutex_destroy(&lnet_devs_mtx);
+    pthread_mutex_destroy(&cpu_info_mtx);
+    pthread_mutex_destroy(&mem_info_mtx);
+
     globals_shutdown();
+
 
 #ifdef ENABLE_LOGGING
     log_shitdown();
