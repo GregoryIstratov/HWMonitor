@@ -216,7 +216,7 @@ static void log_init(int loglvl, const char *filename) {
     stdlog = fopen(filename, "a");
 }
 
-static void log_shitdown() {
+static void log_shutdown() {
     if (stdlog) fclose(stdlog);
 }
 
@@ -342,177 +342,11 @@ typedef void(*data_release_cb)(void *p);
 // RETURN MSG
 //======================================================================================================================
 // 64 bit
-// [16 bit reserved][16 bit value data][16 bit idx msg][8 bit depth][8 bit code]
-
-#define RETURN_CHECK(x) { ret_f_t r = return_map(x); \
-if(r.code!=ST_OK) LOG_WARN("Return result code(%d) is not ok. User_data=%d. Msg: (%s). Depth=%d", r.code, r.data, gmsg_tab[r.idx], r.depth); \
-return return_forward(x); }
-
-#define CHECK_RETURN(x) { ret_f_t r = return_map(x); \
-if(r.code!=ST_OK) LOG_ASSERT("[%s] Return result code(%d) is not ok. User_data=%d. Msg: (%s). Depth=%d", #x, r.code, r.data, gmsg_tab[r.idx], r.depth);  }
-
-#define RET_MULTITHREADED
 
 typedef uint64_t ret_t;
 
-typedef struct ret_field {
-    union {
-        struct {
-            uint8_t code;
-            uint8_t depth;
-            uint16_t idx;
-            uint16_t data;
-            uint16_t reserved;
-        };
-        ret_t r;
-    };
+#define CHECK_RETURN(x) { if((x) != ST_OK) { LOG_ERROR("%s returns not ok", (#x)); } }
 
-} ret_f_t;
-
-static const ret_t RET_OK = 0;
-
-pthread_spinlock_t gmsg_tab_lock;
-static const char *gmsg_tab[UINT16_MAX]; // about 500 kb, //TODO make it dynamic
-static uint16_t gmsg_idx = 1;
-
-#define return_trace(ret) LOG_TRACE("[%016d][%016d][%08d][%016d][%08d]", ret.reserved, \
- ret.data, ret.depth, ret.idx, ret.code);
-
-
-static ret_t return_create(uint8_t code) {
-
-    ret_f_t ret = {.code = code};
-
-    return ret.r;
-}
-
-static ret_t return_create2(uint8_t code, uint16_t user_data) {
-    ret_f_t ret = {.code =  code};
-    ret.depth = 1;
-    ret.data = user_data;
-
-    return_trace(ret);
-
-    return ret.r;
-}
-
-static ret_f_t return_map(ret_t r) {
-    ret_f_t ret;
-    ret.r = r;
-    return ret;
-}
-
-static uint8_t return_code(ret_t r) {
-    ret_f_t ret = return_map(r);
-    return ret.code;
-}
-
-static uint16_t return_data(ret_t r) {
-    ret_f_t ret = return_map(r);
-    return ret.data;
-}
-
-static ret_t return_create_mv(uint8_t code, const char *msg, uint16_t user_data) {
-
-#ifdef RET_MULTITHREADED
-    pthread_spin_lock(&gmsg_tab_lock);
-
-    gmsg_tab[gmsg_idx++] = msg;
-
-    pthread_spin_unlock(&gmsg_tab_lock);
-#else
-    gmsg_tab[gmsg_idx++] = msg;
-#endif
-
-    ret_f_t ret;
-    ret.r = 0;
-    ret.code = code;
-    ret.idx = (uint16_t) (gmsg_idx - 1);
-    ret.depth = 0;
-    ret.data = user_data;
-
-    return_trace(ret);
-
-    return ret.r;
-}
-
-static ret_t return_forward(ret_t r) {
-    ret_f_t ret;
-    ret.r = r;
-
-    return_trace(ret);
-
-    ret.depth++;
-
-
-    return_trace(ret);
-
-    return ret.r;
-
-}
-
-typedef struct ret_info {
-    uint8_t code;
-    const char *msg;
-    uint8_t depth;
-    uint16_t user_data;
-} ret_info_t;
-
-static void return_unpack(ret_t r, ret_info_t *info) {
-    ret_f_t ret;
-    ret.r = r;
-    info->code = ret.code;
-
-    uint16_t idx = ret.idx;
-#ifdef RET_MULTITHREADED
-    pthread_spin_lock(&gmsg_tab_lock);
-
-    info->msg = gmsg_tab[idx];
-
-    pthread_spin_unlock(&gmsg_tab_lock);
-#else
-    info->msg = gmsg_tab[idx];
-#endif
-
-    info->depth = ret.depth;
-
-    info->user_data = ret.data;
-}
-
-static ret_t _test_ret3() {
-    return return_create_mv(ST_OUT_OF_RANGE, "Massive bounds", 463);
-}
-
-static ret_t _test_ret2() {
-    return return_forward(_test_ret3());
-}
-
-static ret_t _test_ret1() {
-    ret_t r = _test_ret2();
-
-    return return_forward(r);
-}
-
-static void test_ret() {
-
-    ASSERT_EQ(sizeof(ret_f_t), sizeof(ret_t));
-
-    ret_t ret = _test_ret1();
-
-
-    ret_info_t info;
-    return_unpack(ret, &info);
-
-    ASSERT_EQ(info.code, ST_OUT_OF_RANGE);
-    ASSERT_EQ(info.depth, 2);
-    ASSERT(strcmp(info.msg, "Massive bounds") == 0);
-    ASSERT_EQ(info.user_data, 463);
-
-
-    ret_f_t r2 = return_map(ST_OK);
-
-    ASSERT_EQ(r2.code, ST_OK);
-}
 
 //======================================================================================================================
 //
@@ -586,8 +420,6 @@ static ret_t init_gloabls() {
 #ifdef RET_MULTITHREADED
     pthread_spin_init(&gmsg_tab_lock, 0);
 #endif
-    //disable buffering for stdout
-    //setvbuf(stdout, NULL, _IONBF, 0);
 
     string_init_globals();
 
@@ -608,132 +440,11 @@ static ret_t globals_shutdown() {
 }
 
 
-//======================================================================================================================
-// blob operations
-//======================================================================================================================
-/**
-typedef struct {
-    uint64_t id;
-    uint64_t ref;
-    uint64_t size;
-} object_t;
-
-static void *object_create(size_t size) {
-    size_t csize = size + sizeof(object_t);
-    char *ptr = malloc(csize);
-    object_t b;
-    b.id = (uint64_t) ptr;
-    b.ref = 1;
-    b.size = size;
-
-    memcpy(ptr, &b, sizeof(object_t));
-
-
-    // registration
-    ht_key_t *key = NULL;
-    ht_create_key_i((uint64_t) ptr, &key);
-
-    ht_value_t *val = NULL;
-    ht_create_value(ptr, csize, &val);
-
-    ht_set(alloc_table, key, val);
-    //-------------
-
-    return ptr + sizeof(object_t);
-}
-
-static void *object_share(void *a, size_t obj_size) {
-    object_t *b = (object_t *) ((char *) a - obj_size);
-    //atomic_fetch_add(&b->ref, 1);
-    b->ref++;
-    return a;
-}
-
-static void *object_copy(void *a, size_t obj_size) {
-    object_t *c = (object_t *) ((char *) a - obj_size);
-
-    size_t csize = c->size + sizeof(object_t);
-    uint64_t *ptr = malloc(csize);
-    object_t b;
-    b.id = (uint64_t) ptr;
-    b.ref = 1;
-    b.size = c->size;
-
-    memcpy(ptr, &b, sizeof(object_t));
-
-    // registration
-    ht_key_t *key = NULL;
-    ht_create_key_i((uint64_t) ptr, &key);
-
-    ht_value_t *val = NULL;
-    ht_create_value(ptr, csize, &val);
-
-    ht_set(alloc_table, key, val);
-    //-------------
-
-    return ptr + sizeof(object_t);
-}
-
-static void object_release(void *a, size_t obj_size) {
-    object_t *c = (object_t *) ((char *) a - obj_size);
-
-    if (c->ref > 0) {
-        //atomic_fetch_add(&c->ref, -1);
-        c->ref--;
-    }
-}
-
-#define OBJECT_DECLARE() uint64_t __alive;
-#define OBJECT_INIT(x) x->__alive = object_alive_value;
-#define OBJECT_CREATE(type) (type*)(object_create(sizeof(type)));
-#define OBJECT_SHARE(x, type) (type*)object_share(x, sizeof(type));
-#define OBJECT_COPY(x, type) (type*)object_copy(x)
-#define OBJECT_RELEASE(x, type) object_release(x, sizeof(type))
-
-**/
 //===============================================================
 // ALLOCATORS
 //===============================================================
 
-/**
-typedef struct alloc_stat {
-    uint64_t size;
-} alloc_stat_t;
-
-static void _record_alloc_set(void *ptr, size_t size) {
-    alloc_stat_t *stat = malloc(sizeof(alloc_stat_t));
-    stat->size = size;
-
-    ht_key_t *key = NULL;
-    ht_create_key_i((uint64_t) (uint64_t *) ptr, &key);
-
-    ht_value_t *val = NULL;
-    ht_create_value(stat, sizeof(struct alloc_stat), &val);
-
-
-    ht_set(alloc_table, key, val);
-}
-
-static ret_t _record_alloc_get(void *ptr, alloc_stat_t **stat) {
-    ht_value_t *val = NULL;
-    ht_key_t *key = calloc(sizeof(ht_key_t), 1);
-    key->u.i = PTR_TO_U64(ptr);
-    int res = ht_get(alloc_table, key, &val);
-    free(key);
-    if (res != ST_OK)
-        return res;
-
-
-    *stat = malloc(val->size);
-    memcpy(*stat, val->ptr, val->size);
-
-    return ST_OK;
-}
-
-**/
-
 #define safe_free(p) if(p) { free(p); p = NULL; }
-
 
 static void *zalloc(size_t size) {
     void *v = malloc(size);
@@ -748,45 +459,6 @@ static void *zalloc(size_t size) {
     return v;
 
 }
-
-
-#if 0
-
-//TODO rework this shit
-//// zeros allocated memory
-static void *allocz(void *dst, size_t size) {
-    size_t asize = size + (size % ALLOC_ALIGN);
-    char *v = realloc(dst, asize);
-
-    if (dst == NULL)
-        memset(v, 0, asize);
-
-//    if(dst) {
-//        alloc_stat_t *stat = NULL;
-//
-//        if (_record_alloc_get(dst, &stat) == ST_OK) {
-//            LOG_TRACE("found hash: 0x%08lx old_size: %lu new_size: %lu", (uint64_t) (uint64_t *) dst,
-//                    stat->size, asize);
-//
-//            if (asize > stat->size) {
-//                size_t zsize = asize - stat->size;
-//                char *oldp = v + stat->size;
-//                memset(oldp, 0, zsize);
-//            }
-//
-//            free(stat);
-//        }
-//    }
-//    else
-//    {
-//        memset(v, 0, asize);
-//    }
-//
-//    _record_alloc_set(v, asize);
-    return v;
-}
-
-#endif
 
 static void *mmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
@@ -1121,7 +793,7 @@ static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
         a->size = size;
     }
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
@@ -1134,7 +806,7 @@ static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*a), (*a)->ptr, (*a)->size, (*a)->used, (*a)->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_init(dynamic_allocator_t **a) {
@@ -1144,7 +816,7 @@ static ret_t da_init(dynamic_allocator_t **a) {
 
 static ret_t da_release(dynamic_allocator_t *a) {
     if (!a)
-        return return_create(ST_EMPTY);
+        return ST_EMPTY;
 
     if (a) {
         LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
@@ -1154,7 +826,7 @@ static ret_t da_release(dynamic_allocator_t *a) {
         safe_free(a);
     }
 
-    return return_create(ST_OK);;
+    return ST_OK;;
 }
 
 static ret_t da_fit(dynamic_allocator_t *a) {
@@ -1169,7 +841,7 @@ static ret_t da_fit(dynamic_allocator_t *a) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return return_create(ST_OK);;
+    return ST_OK;
 }
 
 static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
@@ -1180,7 +852,7 @@ static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
         LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
                  a, a->ptr, a->size, a->used, a->mul, n);
 
-        return return_create(ST_OUT_OF_RANGE);
+        return ST_OUT_OF_RANGE;
     }
 
     size_t nsize = a->used - n;
@@ -1194,7 +866,7 @@ static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return return_create(ST_OK);;
+    return ST_OK;
 }
 
 static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
@@ -1206,7 +878,7 @@ static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
         LOG_WARN("a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
                  a, a->ptr, a->size, a->used, a->mul, n);
 
-        return return_create(ST_OUT_OF_RANGE);
+        return ST_OUT_OF_RANGE;
     }
 
     da_realloc(a, a->size - n);
@@ -1214,14 +886,14 @@ static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_check_size(dynamic_allocator_t *a, size_t new_size) {
     if (a->size < a->used + new_size)
         da_realloc(a, a->used + new_size);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
@@ -1240,7 +912,7 @@ static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
@@ -1253,7 +925,7 @@ static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_al
         LOG_WARN("a=[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu and end=%lu out of range",
                  a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-        return return_create(ST_OUT_OF_RANGE);
+        return ST_OUT_OF_RANGE;
     }
 
     da_init_n(b, ssize);
@@ -1265,7 +937,7 @@ static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_al
     LOG_TRACE("e b[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 
 }
 
@@ -1284,7 +956,7 @@ static ret_t da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               (*b), (*b)->ptr, (*b)->size, (*b)->used, (*b)->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
@@ -1308,7 +980,7 @@ static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     DA_TRACE(a);
     ASSERT(*b == NULL);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
@@ -1330,7 +1002,7 @@ static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
     DA_TRACE(a);
     DA_TRACE(b);
 
-    return return_create(ST_OK);
+    return ST_OK;
 }
 
 static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
@@ -1340,7 +1012,7 @@ static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
     size_t dsize = end - begin;
     if (dsize > a->used) {
         LOG_WARN("begin(%lu) + end(%lu) >= total used(%lu) bytes", begin, end, a->used);
-        return return_create(ST_SIZE_EXCEED);
+        return ST_SIZE_EXCEED;
     }
 
     dynamic_allocator_t *b = NULL;
@@ -1355,27 +1027,28 @@ static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    return return_create(ST_OK);
+    return ST_OK;
 
 }
 
 static ret_t da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
     if (a->used < b->used)
-        return return_create2(ST_NOT_FOUND, 1);
+        return ST_NOT_FOUND;
     else if (a->used > b->used)
-        return return_create2(ST_NOT_FOUND, (uint16_t) -1);
-    else
-        return return_create2(ST_OK, memcmp(a->ptr, b->ptr, MIN(a->used, b->used)));
+        return ST_NOT_FOUND;
+    else if(memcmp(a->ptr, b->ptr, MIN(a->used, b->used)) == 0)
+        return ST_OK;
+
+    return ST_NOT_FOUND;
 }
 
 
 static ret_t da_comparez(dynamic_allocator_t *a, const char *b) {
     size_t ssize = strlen(b);
-    return return_create2(ST_OK, memcmp(a->ptr, b, MIN(a->used, ssize)));
+    return memcmp(a->ptr, b, MIN(a->used, ssize)) == 0? ST_OK : ST_NOT_FOUND;
 }
 
 static void test_da() {
-    ret_t ret = 0;
     dynamic_allocator_t *da = NULL;
     dynamic_allocator_t *da2 = NULL;
     dynamic_allocator_t *db = NULL;
@@ -1418,35 +1091,28 @@ static void test_da() {
     CHECK_RETURN(da_dub(da, &da2));
     CHECK_RETURN(da_remove(da2, 0, 7));
 
-    ret = da_comparez(da2, "Sweet Maria!");
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+    CHECK_RETURN(da_comparez(da2, "Sweet Maria!"));
 
     CHECK_RETURN(da_sub(da, 13, 19, &db));
 
-    ret = da_comparez(db, "Maria!");
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+    CHECK_RETURN(da_comparez(db, "Maria!"));
 
-    ret = da_compare(db, db);
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+    CHECK_RETURN(da_compare(db, db));
 
     CHECK_RETURN(da_init(&de));
     CHECK_RETURN(da_append(de, " My ", 4));
 
-    ret = da_comparez(de, " My ");
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+    CHECK_RETURN(da_comparez(de, " My "));
 
     CHECK_RETURN(da_sub(da, 7, 12, &df));
 
-    ret = da_comparez(df, "Sweet");
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
-
+    CHECK_RETURN(da_comparez(df, "Sweet"));
 
     CHECK_RETURN(da_append(df, "!", 1));
 
     CHECK_RETURN(da_remove(da, 7, 13));
 
-    ret = da_comparez(da, "Hello, Maria!");
-    ASSERT(return_code(ret) == ST_OK && return_data(ret) == 0);
+    CHECK_RETURN(da_comparez(da, "Hello, Maria!"));
 
     CHECK_RETURN(da_merge(de, &df));
 
@@ -1640,14 +1306,14 @@ static ret_t list_remove(list_t *l, const void *data) {
             free(head);
             --l->size;
 
-            return RET_OK;
+            return ST_OK;
 
         }
 
         head = head->next;
     }
 
-    return return_create(ST_NOT_FOUND);
+    return (ST_NOT_FOUND);
 }
 
 typedef void(*list_traverse_cb)(list_node_t *);
@@ -1863,7 +1529,7 @@ static ret_t regex_compile(regex_t *r, const char *pattern) {
 
         LOG_ERROR("Regex error compiling '%s': %s",
                   pattern, error_message);
-        return return_create(ST_ERR);
+        return (ST_ERR);
     }
     return ST_OK;
 }
@@ -2076,7 +1742,7 @@ static ret_t string_rstrip(string *s) {
 
     if (string_size(s) < 1) {
         LOG_WARN("String size(%lu) is too small", string_size(s));
-        return return_create(ST_OUT_OF_RANGE);
+        return (ST_OUT_OF_RANGE);
     }
 
     size_t n = 0;
@@ -2144,12 +1810,12 @@ static ret_t string_rstrip_ws(string *s) {
 static ret_t string_starts_with(string *s, const char *str) {
     size_t str_len = strlen(str);
     if (str_len > string_size(s))
-        return return_create(ST_SIZE_EXCEED);
+        return (ST_SIZE_EXCEED);
 
     if (memcmp(string_cdata(s), str, str_len) == 0)
-        return return_create(ST_OK);
+        return (ST_OK);
 
-    return return_create(ST_NOT_FOUND);
+    return (ST_NOT_FOUND);
 }
 
 
@@ -2232,7 +1898,7 @@ void string_pair_release_cb(void *p) {
 static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
     regex_t re;
     ret_t ret;
-    if ((ret = regex_compile(&re, pattern)) != RET_OK) {
+    if ((ret = regex_compile(&re, pattern)) != ST_OK) {
         return ret;
     }
 
@@ -2286,7 +1952,7 @@ static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
 
     regfree(&re);
 
-    return return_create(ST_OK);
+    return ST_OK;
 
 }
 
@@ -2344,7 +2010,7 @@ static void test_string() {
     CHECK_RETURN(string_remove_dubseq(d, ' ', 0));
     CHECK_RETURN(string_remove_dubseq(d, ':', 0));
 
-    ASSERT(string_comparez(d, "b3_2_1") == RET_OK);
+    ASSERT(string_comparez(d, "b3_2_1") == ST_OK);
     string_print(d);
 
 
@@ -2432,7 +2098,7 @@ static ret_t fifo_release(fifo_t *l, bool data_release) {
     safe_free(l);
 
 
-    return RET_OK;
+    return ST_OK;
 
 }
 
@@ -2538,7 +2204,7 @@ static ret_t lifo_release(lifo_t *l, bool data_release) {
     safe_free(l);
 
 
-    return RET_OK;
+    return ST_OK;
 
 }
 
@@ -2923,11 +2589,9 @@ static void test_da();
 
 static void test_string();
 
-static void test_ret();
 
 
 static void tests_run() {
-    test_ret();
     test_da();
     test_string();
     test_hash_bt();
@@ -3437,14 +3101,8 @@ static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
         string_create(&dev_devname, "/dev/");
         string_add(dev_devname, dev->name);
 
-        ret_f_t res = return_map(string_compare(dev_devname, name));
-
-        string_release(dev_devname);
-
-
-        if (res.code == ST_OK && res.data == 0) {
+        if(string_compare(dev_devname, name) == ST_OK)
             break;
-        }
     }
 
 
@@ -3461,10 +3119,8 @@ static blk_dev_t *blk_dev_list_direct_search(list_t *devs, string *name) {
     while ((dev = list_iter_next(it))) {
 
 
-        ret_f_t res = return_map(string_compare(dev->name, name));
-        if (res.code == ST_OK && res.data == 0) {
+        if(string_compare(dev->name, name) == ST_OK)
             break;
-        }
     }
 
 
@@ -3719,7 +3375,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
 
     while ((tk = slist_next(ln_it))) {
 
-        LOG_INFO("------- TOKEN LINE-----------");
+        LOG_DEBUG("------- TOKEN LINE-----------");
         string_printt(tk);
 
 
@@ -3742,7 +3398,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
         while (1) {
             int nomatch = regexec(&re, p, n_matches, m, 0);
             if (nomatch) {
-                LOG_INFO("No more matches.");
+                LOG_DEBUG("No more matches.");
                 break;
             }
 
@@ -3801,31 +3457,31 @@ static void sblk_callback(void *ctx, list_t *lines) {
             string_printd(kv->key);
             string_printd(kv->val);
 
-            if (string_comparez(kv->key, "NAME") == RET_OK) {
+            if (string_comparez(kv->key, "NAME") == ST_OK) {
                 dev = blk_dev_list_direct_search(sys->devs, kv->val);
-            } else if (string_comparez(kv->key, "SCHED") == RET_OK) {
+            } else if (string_comparez(kv->key, "SCHED") == ST_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->shed);
 
-            } else if (string_comparez(kv->key, "FSTYPE") == RET_OK) {
+            } else if (string_comparez(kv->key, "FSTYPE") == ST_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->fs);
 
-            } else if (string_comparez(kv->key, "MODEL") == RET_OK) {
+            } else if (string_comparez(kv->key, "MODEL") == ST_OK) {
                 if (dev) {
                     string_strip(kv->val);
                     string_dub(kv->val, &dev->model);
                 }
-            } else if (string_comparez(kv->key, "MOUNTPOINT") == RET_OK) {
+            } else if (string_comparez(kv->key, "MOUNTPOINT") == ST_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->mount);
-            } else if (string_comparez(kv->key, "UUID") == RET_OK) {
+            } else if (string_comparez(kv->key, "UUID") == ST_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->uuid);
-            } else if (string_comparez(kv->key, "LABEL") == RET_OK) {
+            } else if (string_comparez(kv->key, "LABEL") == ST_OK) {
                 if (dev)
                     string_dub(kv->val, &dev->label);
-            } else if (string_comparez(kv->key, "SIZE") == RET_OK) {
+            } else if (string_comparez(kv->key, "SIZE") == ST_OK) {
                 if (dev && dev->size == 0) {
                     string_to_u64(kv->val, &dev->size);
                 }
@@ -3841,86 +3497,6 @@ static void sblk_callback(void *ctx, list_t *lines) {
 
     list_iter_release(ln_it);
     list_release(lines, true);
-
-    /**
-    return;
-
-    fprintf(stdout, "------- LINES OF TOKENS -----------\n");
-    slist_fprint(lines);
-    fflush(stdout);
-
-    string *tk = NULL;
-    list_iter_t* ln_it = NULL;
-    list_iter_init(lines, &ln_it);
-    while ((tk = slist_next(ln_it)) != NULL) {
-
-        fprintf(stdout, "------- TOKEN LINE-----------\n");
-        string_print(tk);
-
-        fprintf(stdout, "------- TOKEN SPLIT-----------\n");
-
-        list_t *tokens = NULL;
-        string_split(tk, ' ', &tokens);
-
-
-        slist_fprint(tokens);
-
-        list_iter_t* tk_it = NULL;
-        list_iter_init(tokens, &tk_it);
-
-        //==============================
-        // vector pair init
-
-        vector_t *vec = NULL;
-        vector_init(&vec, sizeof(skey_value_t));
-
-        //==============================
-
-
-        string *s = NULL;
-        string *sname = NULL;
-        while ((s = slist_next(tk_it)) != NULL) {
-
-
-            list_t *kv = NULL;
-            string_split(s, '=', &kv);
-
-            fprintf(stdout, "------- TOKEN KEY-VALUE -----------\n");
-            slist_fprint(kv);
-
-
-            list_iter_t* kv_it = NULL;
-            list_iter_init(kv, &kv_it);
-
-            string *key = slist_next(kv_it);
-            string *val = slist_next(kv_it);
-
-            string_strip(val);
-
-            if (string_comparez(key, "NAME") == ST_OK)
-                string_dub(val, &sname);
-
-            fprintf(stdout, "------- STRIPED TOKEN KEY-VALUE -----------\n");
-
-            //add kv
-            vector_add_kv(vec, key, val);
-
-            string_print(key);
-            string_print(val);
-
-            list_release(kv, true); kv = NULL;
-        }
-
-
-        //add to ht, not need to free
-        ht_set_s(sys->blk, sname, vec);
-
-        string_release(sname); sname = NULL;
-
-        list_release(tokens, true); tokens = NULL;
-
-    }
-    **/
 
 }
 
@@ -4278,14 +3854,14 @@ static void cpu_info_get(cpu_info_t **cpu_info) {
     string *line;
     uint64_t n_cpu = 0;
     while ((line = list_iter_next(lines_it))) {
-        if (string_starts_with(line, "model name") == RET_OK) {
+        if (string_starts_with(line, "model name") == ST_OK) {
             if (n_cpu > 0) continue;
             string_crop_tail(line, strlen("model name\t:"));
             string_strip(line);
             string_dub(line, &cpu->name);
         }
 
-        if (string_starts_with(line, "cpu MHz") == RET_OK) {
+        if (string_starts_with(line, "cpu MHz") == ST_OK) {
             if (n_cpu++ > 0) continue;
             string_crop_tail(line, strlen("cpu MHz\t: "));
             string_strip(line);
@@ -4851,7 +4427,7 @@ void ncurses_window() {
         mvaddstr(row, COLON_SCHED, "Sch");
         mvaddstr(row, COLON_MOUNT, "Mount");
         mvaddstr(row++, COLON_MODEL, "Model");
-        attroff(COLOR_PAIR(1));
+        attroff(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
 
 
         attroff(A_BOLD);
@@ -5122,8 +4698,7 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
         list_iter_init(devs_b, &it2);
 
         while ((dev_b = list_iter_next(it2))) {
-            ret_f_t cmp = return_map(string_compare(dev_a->name, dev_b->name));
-            if (cmp.code == ST_OK && cmp.data == 0) {
+            if(string_compare(dev_a->name, dev_b->name) == ST_OK) {
                 blk_dev_diff(dev_a, dev_b, sample_size_sec);
                 break;
             }
@@ -5198,8 +4773,7 @@ static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
         list_iter_init(devs_b, &it2);
 
         while ((dev_b = list_iter_next(it2))) {
-            ret_f_t cmp = return_map(string_compare(dev_a->name, dev_b->name));
-            if (cmp.code == ST_OK && cmp.data == 0) {
+            if(string_compare(dev_a->name, dev_b->name) == ST_OK) {
                 net_dev_diff(dev_a, dev_b, sample_size_sec);
                 break;
             }
@@ -5341,7 +4915,11 @@ int main() {
     }
 
 #ifdef ENABLE_LOGGING
+#ifdef NDEBUG
     log_init(LOGLEVEL_WARN, "HWMonitor.log");
+#else
+    log_init(LOGLEVEL_DEBUG, "HWMonitor.log");
+#endif
 #endif
 
     init_gloabls();
@@ -5394,7 +4972,7 @@ int main() {
 
 
 #ifdef ENABLE_LOGGING
-    log_shitdown();
+    log_shutdown();
 #endif
 
 
