@@ -1,0 +1,21 @@
+#!/bin/python
+
+import matplotlib.pyplot as plt
+import csv
+import sys
+
+f = open(sys.argv[1], "r")
+
+reader = csv.reader(x.replace('\0', '') for x in f)
+
+data = list()
+n = 0
+for row in reader:
+    if len(row) > 0:
+        data.append(int(row[1]))
+        n += 1
+
+
+plt.bar(range(0, n), data)
+
+plt.show()

@@ -46,8 +46,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // SETTINGS
 //=======================================================================
 
-#define PTR_TO_U64(ptr) (uint64_t)(uint64_t*)ptr
-#define SAFE_RELEASE(x) { if(x){ free(x); x = NULL; } }
+#define PTR_TO_U64(ptr) (uint64_t)(uint64_t*)(ptr)
+#define SAFE_RELEASE(x) { if(x){ zfree(x); (x) = NULL; } }
 
 #define HW_VERSION_MAJOR 0
 #define HW_VERSION_MINOR_A 0
@@ -55,9 +55,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 #define STRING_INIT_BUFFER 4
-#define ALLOC_ALIGN 16
-
-#define HASHTABLE_SIZE 16
 
 #define DA_MAX_MULTIPLICATOR 4
 
@@ -352,62 +349,6 @@ typedef uint64_t ret_t;
 //
 //======================================================================================================================
 
-typedef struct ht_key {
-    union {
-        char s[8];
-        uint64_t i;
-
-    } u;
-} ht_key_t;
-
-typedef struct ht_value {
-    void *ptr;
-    size_t size;
-} ht_value_t;
-
-typedef struct _ht_item_t {
-    ht_key_t *key;
-    ht_value_t *value;
-    uint64_t hash;
-    struct _ht_item_t *next;
-} ht_item_t;
-
-typedef struct _hashtable_t {
-    ht_item_t *table[HASHTABLE_SIZE];
-} hashtable_t;
-
-static ret_t ht_init(hashtable_t **ht);
-
-static void ht_destroy(hashtable_t *ht);
-
-static ret_t ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value);
-
-static ret_t ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value);
-
-
-typedef void(*ht_forach_cb)(uint64_t, ht_key_t *, ht_value_t *);
-
-static ret_t ht_foreach(hashtable_t *ht, ht_forach_cb cb);
-
-static ret_t ht_create_key_i(uint64_t keyval, ht_key_t **key) {
-    *key = malloc(sizeof(ht_key_t));
-    (*key)->u.i = keyval;
-
-    return ST_OK;
-}
-
-static ret_t ht_create_value(void *p, size_t size, ht_value_t **value) {
-    *value = malloc(sizeof(ht_value_t));
-    (*value)->ptr = p;
-    (*value)->size = size;
-
-    return ST_OK;
-}
-
-
-//======================================================================================================================
-//======================================================================================================================
-
 
 
 static const size_t size_npos = (size_t) -1;
@@ -439,12 +380,360 @@ static ret_t globals_shutdown() {
     return ST_OK;
 }
 
+//=======================================================================
+// CONCURENT HASH TABLE
+//=======================================================================
+typedef uint64_t(*ht_key_hasher)(void* key);
+typedef void(*ht_data_releaser)(void* key);
+
+typedef struct _ht_item_t {
+    void* key;
+    void *value;
+    uint64_t hash;
+    struct _ht_item_t *next;
+} ht_item_t;
+
+typedef struct _hashtable_t {
+    uint64_t table_size;
+    atomic_ullong size;
+    uint64_t* bin_size;
+    ht_item_t** table;
+    pthread_spinlock_t* bin_locks;
+    ht_key_hasher hasher;
+    ht_data_releaser key_releaser;
+    ht_data_releaser value_releaser;
+} hashtable_t;
+
+static ret_t ht_init(hashtable_t **ht, uint64_t table_size, ht_key_hasher hasher, ht_data_releaser key_releaser, ht_data_releaser value_releaser) {
+    *ht = calloc(sizeof(hashtable_t), 1);
+    hashtable_t* pht = *ht;
+    pht->table_size = table_size;
+    pht->hasher = hasher;
+    pht->key_releaser = key_releaser;
+    pht->value_releaser = value_releaser;
+    pht->table = (ht_item_t**)calloc(table_size, sizeof(ht_item_t));
+    pht->bin_locks = (pthread_spinlock_t*)calloc(table_size, sizeof(pthread_spinlock_t));
+    atomic_store_explicit(&pht->size, 0, memory_order_relaxed);
+    pht->bin_size = (uint64_t*)calloc(table_size, sizeof(uint64_t));
+
+    for(uint64_t i = 0; i < table_size; ++i)
+    {
+        pthread_spin_init(&pht->bin_locks[i], 0);
+    }
+
+    return ST_OK;
+}
+
+static void ht_destroy_item(hashtable_t* ht, ht_item_t *item) {
+    if(item) {
+        ht->key_releaser((item)->key);
+        ht->value_releaser((item)->value);
+        free(item);
+    }
+}
+
+static void ht_destroy_items_line(hashtable_t *ht, ht_item_t *start_item) {
+    ht_item_t *next = start_item;
+    ht_item_t *tmp = NULL;
+    while (next) {
+        tmp = next;
+        next = next->next;
+
+        ht_destroy_item(ht, tmp);
+    }
+}
+
+
+static void ht_destroy(hashtable_t *ht) {
+    for (uint64_t i = 0; i < ht->table_size; ++i) {
+        ht_destroy_items_line(ht, ht->table[i]);
+        pthread_spin_destroy(&ht->bin_locks[i]);
+    }
+
+    free((void*)ht->bin_size);
+    free((void*)ht->bin_locks);
+    free((void*)ht->table);
+    free(ht);
+}
+
+
+static ret_t ht_set(hashtable_t *ht, void *key, void *value) {
+    uint64_t hash = ht->hasher(key);
+    size_t bin = hash % ht->table_size;
+
+    pthread_spin_lock(&ht->bin_locks[bin]);
+
+    ht_item_t *item = ht->table[bin];
+    ht_item_t *prev = NULL;
+    while (item) {
+        if (item->hash == hash)
+            break;
+
+        prev = item;
+        item = item->next;
+    }
+
+
+    if (item && item->hash == hash) {
+        ht->value_releaser(item->value);
+        item->value = value;
+        free(key);
+    } else {
+        ht_item_t *new_item = NULL;
+        if ((new_item = calloc(1, sizeof(ht_item_t))) == NULL) {
+            pthread_spin_unlock(&ht->bin_locks[bin]);
+
+            LOG_ERROR("can't alloc");
+            return ST_ERR;
+        }
+
+        new_item->hash = hash;
+        new_item->key = key;
+        new_item->value = value;
+
+        if (prev)
+            prev->next = new_item;
+        else
+            ht->table[bin] = new_item;
+
+        ++ht->bin_size[bin];
+        atomic_fetch_add(&ht->size, 1);
+    }
+
+    pthread_spin_unlock(&ht->bin_locks[bin]);
+
+    return ST_OK;
+}
+
+static ret_t ht_get(hashtable_t *ht, void *key, void **value) {
+    uint64_t hash = ht->hasher(key);
+    uint64_t bin = hash % ht->table_size;
+
+    pthread_spin_lock(&ht->bin_locks[bin]);
+    ht_item_t *item = ht->table[bin];
+
+    while (item) {
+        if (item->hash == hash) {
+            *value = item->value;
+            pthread_spin_unlock(&ht->bin_locks[bin]);
+
+            return ST_OK;
+        }
+
+        item = item->next;
+    }
+
+    pthread_spin_unlock(&ht->bin_locks[bin]);
+
+    return ST_NOT_FOUND;
+}
+
+
+static ret_t ht_del(hashtable_t* ht, void* key)
+{
+    uint64_t hash = ht->hasher(key);
+    uint64_t bin = hash % ht->table_size;
+
+    pthread_spin_lock(&ht->bin_locks[bin]);
+
+    ht_item_t *item = ht->table[bin];
+    ht_item_t *prev = NULL;
+    while (item) {
+        if ((item)->hash == hash)
+        {
+
+            if(prev && (item)->next)
+            {
+                prev->next = (item)->next;
+                ht_destroy_item(ht, item);
+            }
+            else if(prev)
+            {
+                prev->next = NULL;
+                ht_destroy_item(ht, item);
+            }
+            else if(item->next)
+            {
+                ASSERT_EQ(item, ht->table[bin]);
+
+                ht->table[bin] = item->next;
+
+                ht_destroy_item(ht, item);
+            }
+            else
+            {
+                ASSERT_EQ(item, ht->table[bin]);
+                ht_destroy_item(ht, item);
+                ht->table[bin] = NULL;
+            }
+
+            --ht->bin_size[bin];
+            atomic_fetch_sub(&ht->size, 1);
+
+            pthread_spin_unlock(&ht->bin_locks[bin]);
+            return ST_OK;
+        }
+
+        prev = item;
+        item = (item)->next;
+    }
+
+    pthread_spin_unlock(&ht->bin_locks[bin]);
+    return ST_NOT_FOUND;
+}
+
+
+static uint64_t ht_size(hashtable_t* ht)
+{
+    return atomic_load(&ht->size);
+}
+
+static uint64_t ht_table_size(hashtable_t* ht)
+{
+    return ht->table_size;
+}
+
+static uint64_t ht_bin_size(hashtable_t* ht, uint64_t bin)
+{
+    if(bin >= ht->table_size)
+    {
+        LOG_ERROR("out of range");
+        return 0;
+    }
+
+    uint64_t size = 0;
+    pthread_spin_lock(&ht->bin_locks[bin]);
+
+    size = ht->bin_size[bin];
+
+    pthread_spin_unlock(&ht->bin_locks[bin]);
+
+    return size;
+}
+
+static ret_t ht_hist_dump_csv(hashtable_t* ht, const char* filename)
+{
+    FILE* f = fopen(filename, "w");
+    if(!f)
+    {
+        char* err = strerror(errno);
+        LOG_ERROR("can't open the file %s, error=", filename, err);
+        free(err);
+        return ST_ERR;
+    }
+
+    char buff[4096];
+    memset(buff, 0, 4096);
+
+    char* s = buff;
+
+    for(uint64_t i = 0; i < ht->table_size; ++i)
+    {
+        int n = sprintf(s, "%lu,%lu\n", i, ht_bin_size(ht, i));
+        s += n;
+    }
+
+    fwrite(buff, sizeof(char), sizeof(buff), f);
+
+    fclose(f);
+
+    return ST_OK;
+}
+
+typedef void(*ht_foreach_cb)(uint64_t,void*,void*,void*);
+
+static ret_t ht_foreach(hashtable_t *ht, ht_foreach_cb cb, void* ctx) {
+    for (size_t i = 0; i < ht->table_size; ++i) {
+        pthread_spin_lock(&ht->bin_locks[i]);
+        ht_item_t *next = ht->table[i];
+        while (next) {
+            cb(next->hash, next->key, next->value, ctx);
+            next = next->next;
+        }
+        pthread_spin_unlock(&ht->bin_locks[i]);
+    }
+
+    return ST_OK;
+}
 
 //===============================================================
 // ALLOCATORS
 //===============================================================
+static uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
 
-#define safe_free(p) if(p) { free(p); p = NULL; }
+static hashtable_t* g_alloc_ht = NULL;
+
+typedef struct alloc_info
+{
+    uint64_t ptr;
+    uint64_t size;
+    uint64_t allocated;
+} alloc_info_t;
+
+static void common_release_cb(void* p)
+{
+    free(p);
+}
+
+static uint64_t crc64i(uint64_t* i)
+{
+    return crc64(0, (uint8_t*)i, 8);
+}
+
+static uint64_t ht_hasher_u64(void* i)
+{
+    return crc64i((uint64_t*)i);
+}
+
+
+static ret_t alloc_set_info(void* p, uint64_t size, uint64_t allocated)
+{
+    alloc_info_t* info = (alloc_info_t*)calloc(1, sizeof(alloc_info_t));
+    info->allocated = allocated;
+    info->ptr = PTR_TO_U64(p);
+    info->size = size;
+
+    uint64_t* key = (uint64_t*)calloc(1, sizeof(uint64_t));
+    *key = PTR_TO_U64(p);
+
+    return ht_set(g_alloc_ht, key, info);
+}
+
+
+static ret_t alloc_del_info(void* p)
+{
+    uint64_t pi = PTR_TO_U64(p);
+
+    return ht_del(g_alloc_ht, &pi);
+}
+
+static void alloc_summary_cb(uint64_t hash, void* key, void* value, void* ctx)
+{
+    uint64_t* allocated = (uint64_t*)ctx;
+
+    *allocated += ((alloc_info_t*)value)->allocated;
+}
+
+static void alloc_dump_summary()
+{
+    uint64_t allocated = 0;
+
+    ht_foreach(g_alloc_ht, &alloc_summary_cb, &allocated);
+
+    LOG_DEBUG("Current allocated memory %lu bytes in %lu elements", allocated, ht_size(g_alloc_ht));
+}
+
+
+static ret_t init_allocators()
+{
+    ht_init(&g_alloc_ht, 256, &ht_hasher_u64, &common_release_cb, &common_release_cb);
+
+    return ST_OK;
+}
+
+#define safe_free(p) if(p) { zfree(p); p = NULL; }
+
+#ifdef NDEBUG
 
 static void *zalloc(size_t size) {
     void *v = malloc(size);
@@ -455,10 +744,92 @@ static void *zalloc(size_t size) {
 
     memset(v, 0, size);
 
+    return v;
+
+}
+
+#define zfree(p) free(p)
+#define zrealloc(p, size) realloc((p), (size))
+
+#else
+
+static void* _zalloc(size_t size, uint64_t line, const char* fun) {
+    void *v = malloc(size);
+    if (v == NULL) {
+        LOG_ERROR("malloc returns null pointer [size=%lu]. Trying again...", size);
+        return _zalloc(size, line, fun);
+    }
+
+    memset(v, 0, size);
+
+    ret_t r = ST_OK;
+
+    r = alloc_set_info(v, size, size);
+
+    if(r != ST_OK)
+    {
+        _log(__FILE__, line, fun, LOG_ERROR, "Failed to set alloc info");
+    }
+    else
+    {
+        _log(__FILE__, line, fun, LOG_TRACE, "Alloc info set [0x%lX]", PTR_TO_U64(v));
+    }
 
     return v;
 
 }
+
+static void* _zrealloc(void* p, size_t size, uint64_t line, const char* fun) {
+    void *v = realloc(p, size);
+
+    ret_t r = ST_OK;
+
+    if(p != v) {
+        if (alloc_del_info(p) == ST_OK) {
+            _log(__FILE__, line, fun, LOG_TRACE, "[realloc] info free [0x%lX]", p);
+        }
+    }
+
+    if(v) {
+        r = alloc_set_info(v, size, size);
+
+        if(r != ST_OK)
+        {
+            _log(__FILE__, line, fun, LOG_ERROR, "[zrealloc] Failed to set alloc info");
+        }
+        else
+        {
+            _log(__FILE__, line, fun, LOG_TRACE, "Alloc info set [0x%lX]", PTR_TO_U64(v));
+        }
+    }
+
+    return v;
+
+}
+
+static void _zfree(void* p, uint64_t line, const char* fun)
+{
+    if(!p) return;
+
+    if(alloc_del_info(p) != ST_OK)
+    {
+        _log(__FILE__, line, fun, LOG_ERROR, "alloc info not found [0x%lX]", p);
+    }
+    else
+    {
+        _log(__FILE__, line, fun, LOG_TRACE, "alloc info free [0x%lX]", p);
+    }
+
+
+    free(p);
+}
+
+
+#define zalloc(p) _zalloc((p), __LINE__, __func__)
+#define zfree(p) _zfree((p), __LINE__, __func__)
+#define zrealloc(p, size) _zrealloc((p), (size), __LINE__, __func__)
+
+#endif
 
 static void *mmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
@@ -622,135 +993,7 @@ static uint64_t crc64s(const char *str) {
     return crc64(0, (const unsigned char *) str, l);
 }
 
-//=======================================================================
-// HASH TABLE
-//=======================================================================
 
-static unsigned long ht_hash(const char *_str) {
-    const unsigned char *str = (const unsigned char *) _str;
-    unsigned long hash = 5381;
-    int c;
-
-    while ((c = *str++))
-        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-
-    return hash;
-}
-
-
-static ret_t ht_init(hashtable_t **ht) {
-    *ht = calloc(sizeof(hashtable_t), 1);
-    return ST_OK;
-}
-
-static void ht_destroy_item(ht_item_t *item) {
-    free(item->key);
-    free(item->value->ptr);
-    free(item->value);
-    free(item);
-}
-
-static void ht_destroy_items_line(ht_item_t *start_item) {
-    ht_item_t *next = start_item;
-    ht_item_t *tmp = NULL;
-    while (next) {
-        tmp = next;
-        next = next->next;
-
-        ht_destroy_item(tmp);
-    }
-}
-
-
-static void ht_destroy(hashtable_t *ht) {
-    for (size_t i = 0; i < HASHTABLE_SIZE; ++i) {
-        ht_destroy_items_line(ht->table[i]);
-    }
-
-    free(ht);
-}
-
-
-static ret_t ht_create_item(ht_item_t **pitem, uint64_t name_hash, ht_value_t *value) {
-    ht_item_t *item;
-    if ((item = calloc(sizeof(ht_item_t), 1)) == NULL) {
-        LOG_ERROR(" can't alloc");
-        return ST_ERR;
-    }
-
-    item->hash = name_hash;
-    item->value = value;
-
-    *pitem = item;
-
-    return ST_OK;
-}
-
-
-static ret_t ht_set(hashtable_t *ht, ht_key_t *key, ht_value_t *value) {
-    uint64_t hash = key->u.i;
-    size_t bin = hash % HASHTABLE_SIZE;
-
-    ht_item_t *item = ht->table[bin];
-    ht_item_t *prev = NULL;
-    while (item) {
-        if (item->hash == hash)
-            break;
-
-        prev = item;
-        item = item->next;
-    }
-
-
-    if (item && item->hash == hash) {
-        item->value = value;
-        free(key);
-    } else {
-        ht_item_t *new_item = NULL;
-        if ((ht_create_item(&new_item, hash, value)) != ST_OK) {
-            return ST_ERR;
-        }
-
-        new_item->key = key;
-
-        if (prev)
-            prev->next = new_item;
-        else
-            ht->table[bin] = new_item;
-    }
-
-    return ST_OK;
-}
-
-static ret_t ht_get(hashtable_t *ht, ht_key_t *key, ht_value_t **value) {
-    uint64_t hash = key->u.i;
-    uint64_t bin = hash % HASHTABLE_SIZE;
-
-    ht_item_t *item = ht->table[bin];
-
-    while (item) {
-        if (item->hash == hash) {
-            *value = item->value;
-            return ST_OK;
-        }
-
-        item = item->next;
-    }
-
-    return ST_NOT_FOUND;
-}
-
-static ret_t ht_foreach(hashtable_t *ht, ht_forach_cb cb) {
-    for (size_t i = 0; i < HASHTABLE_SIZE; ++i) {
-        ht_item_t *next = ht->table[i];
-        while (next) {
-            cb(next->hash, next->key, next->value);
-            next = next->next;
-        }
-    }
-
-    return ST_OK;
-}
 
 //=======================================================================
 // DYNAMIC ALLOCATOR
@@ -782,13 +1025,13 @@ static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
     } else if (size < a->size || size == 0) {
         size_t ds = a->size - size;
         memset(a->ptr + size, 0, ds);
-        a->ptr = realloc(a->ptr, size);
+        a->ptr = zrealloc(a->ptr, size);
         a->size = size;
         a->used = size;
         a->mul = 1;
     } else if (size > a->size) {
         size_t ds = size - a->size;
-        a->ptr = realloc(a->ptr, size);
+        a->ptr = zrealloc(a->ptr, size);
         memset(a->ptr + a->size, 0, ds);
         a->size = size;
     }
@@ -858,7 +1101,7 @@ static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
     size_t nsize = a->used - n;
     char *newbuff = zalloc(nsize);
     memcpy(newbuff, a->ptr + n, nsize);
-    free(a->ptr);
+    zfree(a->ptr);
     a->ptr = newbuff;
     a->size = nsize;
     a->used = a->size;
@@ -1234,7 +1477,7 @@ static void *list_pop_head(list_t *l) {
     l->size--;
 
     void *data = tmp->data;
-    free(tmp);
+    zfree(tmp);
 
     return data;
 }
@@ -1248,7 +1491,7 @@ static void *list_crop_tail(list_t *l) {
     l->size--;
 
     void *data = tmp->data;
-    free(tmp);
+    zfree(tmp);
 
     return data;
 }
@@ -1269,10 +1512,10 @@ static ret_t list_release(list_t *l, bool release_data) {
 
         head = head->next;
 
-        free(tmp);
+        zfree(tmp);
     }
 
-    free(l);
+    zfree(l);
 
     return ST_OK;
 
@@ -1303,7 +1546,7 @@ static ret_t list_remove(list_t *l, const void *data) {
             hn->prev->next = hp;
             hp->next->prev = hn;
 
-            free(head);
+            zfree(head);
             --l->size;
 
             return ST_OK;
@@ -1825,7 +2068,7 @@ static bool string_re_match(string *s, const char *pattern) {
 
     char *text = string_makez(s);
     bool m = regex_match(&re, text);
-    free(text);
+    zfree(text);
     regfree(&re);
 
     return m;
@@ -1892,7 +2135,7 @@ void string_pair_release_cb(void *p) {
     if (pair->first) string_release(pair->first);
     if (pair->second) string_release(pair->second);
 
-    free(pair);
+    zfree(pair);
 }
 
 static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
@@ -2341,7 +2584,7 @@ static ret_t vector_init(vector_t **vec, size_t elem_size) {
 
 static ret_t vector_release(vector_t *vec) {
     da_release(vec->alloc);
-    free(vec);
+    zfree(vec);
 
     return ST_OK;
 }
@@ -2549,7 +2792,7 @@ static ret_t bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
 
 static void bt_si_release(void *p) {
     str_int_t *data = (str_int_t *) p;
-    free(data);
+    zfree(data);
 }
 
 static ret_t bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
@@ -3088,7 +3331,7 @@ static void blk_dev_release_cb(void *p) {
     if (dev->uuid) string_release(dev->uuid);
     if (dev->shed) string_release(dev->shed);
 
-    free(dev);
+    zfree(dev);
 }
 
 static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
@@ -3101,8 +3344,12 @@ static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
         string_create(&dev_devname, "/dev/");
         string_add(dev_devname, dev->name);
 
-        if(string_compare(dev_devname, name) == ST_OK)
+        if(string_compare(dev_devname, name) == ST_OK) {
+            string_release(dev_devname);
             break;
+        }
+
+        string_release(dev_devname);
     }
 
 
@@ -3205,19 +3452,6 @@ static void df_init(list_t *devs, df_t **df) {
     (*df)->skip_first = 1;
 }
 
-static ret_t ht_set_df(hashtable_t *ht, string *key, df_stat_t *stat) {
-
-    ht_key_t *hkey = NULL;
-    uint64_t hash = crc64(0, (const uint8_t *) string_cdata(key), string_size(key));
-    ht_create_key_i(hash, &hkey);
-
-    ht_value_t *val = NULL;
-    ht_create_value(stat, sizeof(df_stat_t), &val);
-
-    ht_set(ht, hkey, val);
-
-    return ST_OK;
-}
 
 static void df_callback(void *ctx, list_t *lines) {
     df_t *df = (df_t *) ctx;
@@ -3337,19 +3571,6 @@ static ret_t vector_add_kv(vector_t *vec, string *key, string *val) {
     return ST_OK;
 }
 
-static ret_t ht_set_s(hashtable_t *ht, string *key, vector_t *vec) {
-
-    ht_key_t *hkey = NULL;
-    uint64_t hash = crc64(0, (const uint8_t *) string_cdata(key), string_size(key));
-    ht_create_key_i(hash, &hkey);
-
-    ht_value_t *val = NULL;
-    ht_create_value(vec, sizeof(vector_t), &val);
-
-    ht_set(ht, hkey, val);
-
-    return ST_OK;
-}
 
 typedef struct string_string_pair {
     string *key;
@@ -3361,7 +3582,7 @@ static void ss_kv_release_cb(void *p) {
     ss_kv_t *kv = (ss_kv_t *) p;
     string_release(kv->key);
     string_release(kv->val);
-    free(kv);
+    zfree(kv);
 }
 
 static void sblk_callback(void *ctx, list_t *lines) {
@@ -3433,7 +3654,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
                         list_push(pairs, ss_kv);
                     } else {
                         string_release(key);
-                        free(ss_kv);
+                        zfree(ss_kv);
                     }
                 }
 
@@ -3443,7 +3664,7 @@ static void sblk_callback(void *ctx, list_t *lines) {
         }
 
         regfree(&re);
-        free(tkp);
+        zfree(tkp);
 
 
         //================================
@@ -3521,7 +3742,7 @@ static ret_t sblk_execute(sblkid_t *sblk) {
     cmd_execute(ccmd, sblk, &sblk_callback);
 
     string_release(cmd);
-    free(ccmd);
+    zfree(ccmd);
     return ST_OK;
 }
 
@@ -3534,7 +3755,7 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
 
     char *dir_c = string_makez(basedir);
     DIR *d = opendir(dir_c);
-    free(dir_c);
+    zfree(dir_c);
 
     if (d) {
         while ((dir = readdir(d)) != NULL) {
@@ -3571,7 +3792,7 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
                 file_read_all_s(stat_filename_c, stat_s);
                 string_strip(stat_s);
 
-                free(stat_filename_c);
+                zfree(stat_filename_c);
                 string_release(stat_filename);
 
                 list_t *lstat_s = NULL;
@@ -3636,7 +3857,7 @@ static void net_dev_release_cb(void *p) {
         if (dev->sysdir) string_release(dev->sysdir);
         if (dev->mtu) string_release(dev->mtu);
         if (dev->speed) string_release(dev->speed);
-        free(dev);
+        zfree(dev);
     }
 }
 
@@ -3652,7 +3873,7 @@ static inline string *file_read_subdir(string *subdir, const char *filepath) {
     file_read_all_s(filename_c, data);
     string_strip(data);
 
-    free(filename_c);
+    zfree(filename_c);
     string_release(filename);
 
     return data;
@@ -3755,7 +3976,7 @@ typedef struct cpu_dev {
 } cpu_dev_t;
 
 static void cpu_dev_release_cb(void *p) {
-    free(p);
+    zfree(p);
 }
 
 static void cpu_dev_get(cpu_dev_t **cpu_dev) {
@@ -3832,7 +4053,7 @@ static void cpu_info_release_cb(void *p) {
     if (cpui->name) string_release(cpui->name);
     if (cpui->clock) string_release(cpui->clock);
 
-    free(cpui);
+    zfree(cpui);
 }
 
 static void cpu_info_get(cpu_info_t **cpu_info) {
@@ -3900,7 +4121,7 @@ static void mem_info_release_cb(void* p)
 
     mem_info_t* mem = (mem_info_t*)p;
 
-    free(mem);
+    zfree(mem);
 }
 
 
@@ -4268,9 +4489,9 @@ static void ncurses_bar_render(int row, int col, int64_t progress)
 
     mvaddstr(row, col + 51, "]");
 
-    free(gbar);
-    free(ybar);
-    free(rbar);
+    zfree(gbar);
+    zfree(ybar);
+    zfree(rbar);
 }
 
 static void ncurses_cpu_bar_render(int row, int col) {
@@ -4371,8 +4592,8 @@ void ncurses_window() {
 
             ncurses_addstrf(row++, 1, "%dx %s (%s MHz)", g_cpu_info->cores, cpu_name, cpu_clock);
 
-            free(cpu_clock);
-            free(cpu_name);
+            zfree(cpu_clock);
+            zfree(cpu_name);
         }
 
         pthread_mutex_unlock(&cpu_info_mtx);
@@ -4468,11 +4689,11 @@ void ncurses_window() {
                 mvaddstr(row++, COLON_MODEL, model);
 
 
-                free(shed);
-                free(mount);
-                free(model);
-                free(fs);
-                free(name);
+                zfree(shed);
+                zfree(mount);
+                zfree(model);
+                zfree(fs);
+                zfree(name);
 
                 attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
             }
@@ -4522,9 +4743,9 @@ void ncurses_window() {
                 mvaddstr(row, COLON_NET_SPEED, speed);
                 mvaddstr(row, COLON_NET_PERC, perc);
 
-                free(speed);
-                free(mtu);
-                free(name);
+                zfree(speed);
+                zfree(mtu);
+                zfree(name);
 
                 attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
             }
@@ -4630,7 +4851,7 @@ static void devices_get(list_t **devs) {
     df_t *df;
     df_init(*devs, &df);
     df_execute(df);
-    free(df);
+    zfree(df);
 
     sblkid_t blk;
     blk.devs = *devs;
@@ -4657,13 +4878,13 @@ static void devices_get(list_t **devs) {
 
         );
 
-        free(label);
-        free(uuid);
-        free(mount);
-        free(model);
-        free(fs);
-        free(syspath);
-        free(name);
+        zfree(label);
+        zfree(uuid);
+        zfree(mount);
+        zfree(model);
+        zfree(fs);
+        zfree(syspath);
+        zfree(name);
     }
 
     list_iter_release(list_it);
@@ -4900,7 +5121,14 @@ void sig_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
         atomic_store(&programm_exit, true);
     }
+
+    if(signo == SIGUSR1)
+    {
+        alloc_dump_summary();
+    }
 }
+
+
 
 //=======================================================================================
 // MAIN
@@ -4913,6 +5141,10 @@ int main() {
                 "Check LANG, LC_CTYPE, LC_ALL.\n");
         return 1;
     }
+
+#ifndef NDEBUG
+    init_allocators();
+#endif
 
 #ifdef ENABLE_LOGGING
 #ifdef NDEBUG
@@ -4970,11 +5202,17 @@ int main() {
 
     globals_shutdown();
 
+#ifndef NDEBUG
+    alloc_dump_summary();
+
+    ht_hist_dump_csv(g_alloc_ht, "alloc_ht_hist.csv");
+
+    ht_destroy(g_alloc_ht);
+#endif
 
 #ifdef ENABLE_LOGGING
     log_shutdown();
 #endif
-
 
     return 0;
 }
