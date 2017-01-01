@@ -1,17 +1,21 @@
-/**************************************************************************************
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-        the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+/*************************************************************************************************************
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+            the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-        but WITHOUT ANY WARRANTY; without even the implied warranty of
-                        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
+    This program is distributed in the hope that it will be useful,
+            but WITHOUT ANY WARRANTY; without even the implied warranty of
+                            MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
-**************************************************************************************/
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*************************************************************************************************************/
+
+//============================================================================================================
+// INCLUDES
+//============================================================================================================
 
 #include <features.h>
 #include <unistd.h>
@@ -40,12 +44,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //#include <blkid/blkid.h> // libblkid-dev
 #include <ncurses.h>     // libncurses5-dev
 
-
-
-
-//=======================================================================
+//============================================================================================================
 // SETTINGS
-//=======================================================================
+//============================================================================================================
 
 #define HW_VERSION_MAJOR 0
 #define HW_VERSION_MINOR_A 0
@@ -57,9 +58,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define DEVICE_BASE_SAMPLE_RATE 0.01
 
-//===============================================================
+//============================================================================================================
 // GLOBAS
-//===============================================================
+//============================================================================================================
 #define PTR_TO_U64(ptr) (u64)(u64*)(ptr)
 #define SAFE_RELEASE(x) { if(x){ zfree(x); (x) = NULL; } }
 #define CHECK_RETURN(x) { if((x) != ST_OK) { LOG_ERROR("%s returns not ok", (#x)); } }
@@ -98,27 +99,21 @@ typedef u64 ret_t;
 
 typedef void(* data_release_cb)(void* p);
 
-static void string_init_globals();
 
 static ret_t init_gloabls() {
 
-    string_init_globals();
 
     return ST_OK;
 }
-
-static void string_shutdown_globals();
 
 static ret_t globals_shutdown() {
 
-    string_shutdown_globals();
-
     return ST_OK;
 }
 
-//=======================================================================
+//============================================================================================================
 // TIMERS AND SLEEP
-//=======================================================================
+//============================================================================================================
 
 static struct timespec timer_start() {
     struct timespec start_time;
@@ -154,14 +149,14 @@ static inline void nsleepd(double seconds) {
     nsleep((u64)(seconds * NANOSEC_IN_SEC));
 }
 
-//=======================================================================
+//============================================================================================================
 // LOG
-//=======================================================================
+//============================================================================================================
 
 #define ENABLE_LOGGING
 
 #ifndef ENABLE_LOGGING
-                                                                                                                        #define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
+#define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
 #define LOG_WARN(...) (_log(stdout, __VA_ARGS__))
 #define LOG_DEBUG(...) (_log(stdout, __VA_ARGS__))
 #define LOG_INFO(...) (_log(stdout, __VA_ARGS__))
@@ -195,7 +190,7 @@ static void _log(FILE* out, ...)
 #define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
 #define ASSERT_EQ(a, b) ((a == b)?__ASSERT_VOID_CAST (0): LOG_ASSERT("%s != %s [%lu] != [%lu]", #a, #b, a, b))
 #else
-                                                                                                                        #define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
+#define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
 #define LOG_WARN(...) (_log(__FILE__, __LINE__, __func__, LOG_WARN, __VA_ARGS__))
 #define LOG_DEBUG(...) ((void)0)
 #define LOG_INFO(...) ((void)0)
@@ -217,7 +212,7 @@ static void _log(FILE* out, ...)
 #define LOG_GRN   "\x1B[32m"
 #define LOG_YEL   "\x1B[33m"
 #define LOG_BLU   "\x1B[34m"
-#define LOG MAG   "\x1B[35m"
+#define LOG_MAG   "\x1B[35m"
 #define LOG_CYN   "\x1B[36m"
 #define LOG_WHT   "\x1B[37m"
 #define LOG_RESET "\x1B[0m"
@@ -365,9 +360,9 @@ static void _log(const char* file, u64 line, const char* fun, u64 lvl, ...) {
 #endif // ENABLE_LOGGING
 
 
-//=======================================================================
+//============================================================================================================
 // CONCURENT HASH TABLE
-//=======================================================================
+//============================================================================================================
 typedef u64(* ht_key_hasher)(void* key);
 
 typedef void(* ht_data_releaser)(void* key);
@@ -624,9 +619,9 @@ static ret_t ht_foreach(hashtable_t* ht, ht_foreach_cb cb, void* ctx) {
     return ST_OK;
 }
 
-//===============================================================
+//============================================================================================================
 // ALLOCATORS
-//===============================================================
+//============================================================================================================
 static u64 crc64(u64 crc, const u8* s, u64 l);
 
 static hashtable_t* g_alloc_ht = NULL;
@@ -774,12 +769,9 @@ static void* mcopy(void* dst, const void* src, u64 size) {
     return memcpy(dst, src, size);
 }
 
-
-//================================================================
-
-//=======================================================================
+//============================================================================================================
 // CRC64
-//=======================================================================
+//============================================================================================================
 
 static const u64 crc64_tab[256] = {
         UINT64_C(0x0000000000000000), UINT64_C(0x7ad870c830358979),
@@ -929,9 +921,9 @@ static u64 crc64s(const char* str) {
 
 
 
-//=======================================================================
+//============================================================================================================
 // DYNAMIC ALLOCATOR
-//=======================================================================
+//============================================================================================================
 
 #define DA_TRACE(a) (LOG_TRACE("[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu", \
 a, a->ptr, a->size, a->used, a->mul))
@@ -1310,9 +1302,9 @@ static void test_da() {
     da_release(df);
     df = NULL;
 }
-//=======================================================================
+//============================================================================================================
 // GENERIC DOUBLE LINKED LIST
-//=======================================================================
+//============================================================================================================
 
 typedef struct list_node {
     void* data;
@@ -1671,9 +1663,9 @@ void test_list() {
 }
 
 
-//=======================================================================
+//============================================================================================================
 // REGEX
-//=======================================================================
+//============================================================================================================
 
 #define MAX_ERROR_MSG 0x1000
 
@@ -1700,9 +1692,9 @@ static bool regex_match(regex_t* r, const char* text) {
     return true;
 }
 
-//=======================================================================
+//============================================================================================================
 // STRING
-//=======================================================================
+//============================================================================================================
 
 typedef struct {
     union {
@@ -1720,7 +1712,6 @@ typedef struct skey_value {
     string* value;
 } skey_value_t;
 
-static string* string_null = NULL;
 
 static ret_t string_init(string** sp) {
     return da_init(_dap(sp));
@@ -1787,16 +1778,6 @@ static ret_t string_appendf(string* s, const char* fmt, ...) {
 static ret_t string_append_se(string* s, const char* start, const char* end) {
     u64 sz = end - start;
     return da_append(_da(s), start, sz);
-}
-
-static void string_init_globals() {
-    string_init(&string_null);
-    string_append(string_null, "(null)");
-}
-
-static void string_shutdown_globals() {
-    if (string_null)
-        string_release(string_null);
 }
 
 static char* string_makez(string* s) {
@@ -2171,9 +2152,9 @@ static void test_string() {
 
 }
 
-//=======================================================================
+//============================================================================================================
 // GENERIC FIFO
-//=======================================================================
+//============================================================================================================
 
 typedef struct fifo_node {
     void* data;
@@ -2275,9 +2256,9 @@ void test_fifo() {
 
 }
 
-//=======================================================================
+//============================================================================================================
 // GENERIC LIFO
-//=======================================================================
+//============================================================================================================
 
 typedef struct lifo_node {
     void* data;
@@ -2375,9 +2356,9 @@ void test_lifo() {
 
 }
 
-//=======================================================================
+//============================================================================================================
 // SLIST
-//=======================================================================
+//============================================================================================================
 
 static void slist_fprintd(list_t* sl) {
 
@@ -2456,9 +2437,9 @@ static ret_t string_split(string* s, char delm, list_t** l) {
     return ST_OK;
 }
 
-//=======================================================================
+//============================================================================================================
 // GENERIC VECTOR
-//=======================================================================
+//============================================================================================================
 typedef struct vector {
     dynamic_allocator_t* alloc;
     u64 size;
@@ -2521,9 +2502,9 @@ static void vector_foreach(vector_t* vec, void* ctx, vector_foreach_cb cb) {
 }
 
 
-//=============================================================================================
+//============================================================================================================
 // HASH BINARY TREE
-//=============================================================================================
+//============================================================================================================
 
 typedef struct bt_node {
     u64 hash_key;
@@ -2706,9 +2687,9 @@ static void bt_si_traverse(binary_tree_t* bt) {
     bt_node_traverse(bt->head, &bt_si_traverse_cb);
 }
 
-//=============================================================================================
+//============================================================================================================
 // TESTS
-//=============================================================================================
+//============================================================================================================
 
 
 static ret_t test_split();
@@ -2725,9 +2706,11 @@ static void tests_run() {
     test_hash_bt();
     test_fifo();
     test_lifo();
-    test_list();
-    test_split();
 
+    //TODO test_list breaks the memory
+    //test_list();
+
+    test_split();
 }
 
 static void test_hash_bt() {
@@ -2946,7 +2929,7 @@ static ret_t test_split() {
 
             LOG_TRACE("------- STRIPED TOKEN KEY-VALUE -----------");
             string_printt(key);
-            string_printt(string_null);
+            LOG_TRACE("(null)");
 
             list_release(kv, true);
             kv = NULL;
@@ -2968,21 +2951,21 @@ static ret_t test_split() {
 
 }
 
-//========================================================================
+//============================================================================================================
 
 
 enum {
     /// These values increment when an I/O request completes.
-            READ_IO = 0, ///requests - number of read I/Os processed
+            READ_IO = 0UL, ///requests - number of read I/Os processed
 
     /// These values increment when an I/O request is merged with an already-queued I/O request.
-            READ_MERGE = 1, /// requests - number of read I/Os merged with in-queue I/O
+            READ_MERGE = 1UL, /// requests - number of read I/Os merged with in-queue I/O
 
     /// These values count the number of sectors read from or written to this block device.
     /// The "sectors" in question are the standard UNIX 512-byte sectors, not any device- or
     /// filesystem-specific block size.
     /// The counters are incremented when the I/O completes.
-            READ_SECTORS = 2, /// requests - number of read I/Os merged with in-queue I/O
+            READ_SECTORS = 2UL, /// requests - number of read I/Os merged with in-queue I/O
 
 
     /// These values count the number of milliseconds that I/O requests have
@@ -2990,19 +2973,19 @@ enum {
     /// these values will increase at a rate greater than 1000/second; for
     /// example, if 60 read requests wait for an average of 30 ms, the read_ticks
     /// field will increase by 60*30 = 1800.
-            READ_TICKS = 3, ///milliseconds - total wait time for read requests
+            READ_TICKS = 3UL, ///milliseconds - total wait time for read requests
 
     /// These values increment when an I/O request completes.
-            WRITE_IO = 4, /// requests - number of write I/Os processed
+            WRITE_IO = 4UL, /// requests - number of write I/Os processed
 
     /// These values increment when an I/O request is merged with an already-queued I/O request.
-            WRITE_MERGES = 5, /// requests - number of write I/Os merged with in-queue I/O
+            WRITE_MERGES = 5UL, /// requests - number of write I/Os merged with in-queue I/O
 
     /// These values count the number of sectors read from or written to this block device.
     /// The "sectors" in question are the standard UNIX 512-byte sectors, not any device- or
     /// filesystem-specific block size.
     /// The counters are incremented when the I/O completes.
-            WRITE_SECTORS = 6, /// sectors - number of sectors written
+            WRITE_SECTORS = 6UL, /// sectors - number of sectors written
 
 
     /// These values count the number of milliseconds that I/O requests have
@@ -3010,27 +2993,27 @@ enum {
     /// these values will increase at a rate greater than 1000/second; for
     /// example, if 60 read requests wait for an average of 30 ms, the read_ticks
     /// field will increase by 60*30 = 1800.
-            WRITE_TICKS = 7, /// milliseconds - total wait time for write requests
+            WRITE_TICKS = 7UL, /// milliseconds - total wait time for write requests
 
     /// This value counts the number of I/O requests that have been issued to
     /// the device driver but have not yet completed.  It does not include I/O
     /// requests that are in the queue but not yet issued to the device driver.
-            IN_FLIGHT = 8, /// requests - number of I/Os currently in flight
+            IN_FLIGHT = 8UL, /// requests - number of I/Os currently in flight
 
     /// This value counts the number of milliseconds during which the device has
     /// had I/O requests queued.
-            IO_TICKS = 9, /// milliseconds - total time this block device has been active
+            IO_TICKS = 9UL, /// milliseconds - total time this block device has been active
 
     /// This value counts the number of milliseconds that I/O requests have waited
     /// on this block device.  If there are multiple I/O requests waiting, this
     /// value will increase as the product of the number of milliseconds times the
     /// number of requests waiting (see "read ticks" above for an example).
-            TIME_IN_QUEUE = 10 /// milliseconds - total wait time for all requests
+            TIME_IN_QUEUE = 10UL /// milliseconds - total wait time for all requests
 };
 
-//===============================================================================
+//============================================================================================================
 // FILE UTILS
-//===============================================================================
+//============================================================================================================
 
 static u64 get_sfile_size(const char* filename) {
     struct stat st;
@@ -3168,9 +3151,9 @@ void human_readable_size(u64 bytes, double* result, int* type) {
     }
 }
 
-//===============================================================================
+//============================================================================================================
 // BLOCK DEVICE MANAGMENT
-//===============================================================================
+//============================================================================================================
 
 typedef struct blk_dev {
     string* name;
@@ -3264,9 +3247,9 @@ static void blk_dev_diff(blk_dev_t* a, blk_dev_t* b, double sample_size) {
     b->perf_write = b->stat[WRITE_SECTORS] * BLOCK_SIZE / sample_size;
 }
 
-//===============================================================================
+//============================================================================================================
 // CMD EXECUTOR
-//===============================================================================
+//============================================================================================================
 static ret_t cmd_execute(const char* cmd, void* ctx, cmd_exec_cb cb) {
     FILE* fpipe;
 
@@ -3292,9 +3275,9 @@ static ret_t cmd_execute(const char* cmd, void* ctx, cmd_exec_cb cb) {
     return ST_OK;
 }
 
-//===============================================================================
-// df Utils
-//===============================================================================
+//============================================================================================================
+// DF UTILS
+//============================================================================================================
 enum {
     DFS_NAME = 0,
     DFS_TOTAL = 1,
@@ -3408,9 +3391,9 @@ static void df_execute(df_t* dfs) {
     cmd_execute(cmd, dfs, &df_callback);
 }
 
-//===============================================================================
-// blk utils
-//===============================================================================
+//============================================================================================================
+// BLK UTILS
+//============================================================================================================
 
 enum {
     BLK_NAME = 0,
@@ -3464,7 +3447,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
         string_printt(tk);
 
 
-        //================================
+        //====================================================================================================
         regex_t re;
         regex_compile(&re, "(\\w+)=\"([[:alnum:][:space:]/-]*)\"");
 
@@ -3530,7 +3513,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
         zfree(tkp);
 
 
-        //================================
+        //====================================================================================================
         list_iter_t* kv_it = NULL;
         list_iter_init(pairs, &kv_it);
 
@@ -3575,7 +3558,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
         list_iter_release(kv_it);
         list_release(pairs, true);
 
-        //================================
+        //====================================================================================================
     }
 
     list_iter_release(ln_it);
@@ -3584,7 +3567,8 @@ static void sblk_callback(void* ctx, list_t* lines) {
 }
 
 static ret_t sblk_execute(sblkid_t* sblk) {
-    static const char* options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
+    static const char* options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID",
+                                    "MOUNTPOINT"};
 
     string* cmd = NULL;
     string_create(&cmd, "lsblk -i -P -b -o ");
@@ -3606,9 +3590,9 @@ static ret_t sblk_execute(sblkid_t* sblk) {
     return ST_OK;
 }
 
-//===============================================================================
+//============================================================================================================
 // BLOCK DEVICE SCANNER
-//===============================================================================
+//============================================================================================================
 
 static void blk_dev_scan(string* basedir, list_t* devs) {
     struct dirent* dir = NULL;
@@ -3691,9 +3675,9 @@ static void blk_dev_scan(string* basedir, list_t* devs) {
     }
 }
 
-//===============================================================================
+//============================================================================================================
 // NET DEVICE
-//===============================================================================
+//============================================================================================================
 
 typedef struct net_dev {
     string* name;
@@ -3817,9 +3801,9 @@ static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate) {
     b->tx_speed = dtx / sample_rate;
 }
 
-//===============================================================================
+//============================================================================================================
 // CPU DEVICE
-//===============================================================================
+//============================================================================================================
 
 typedef struct cpu_dev {
     u64 user;
@@ -3959,16 +3943,29 @@ static void cpu_info_get(cpu_info_t** cpu_info) {
 }
 
 
-//===============================================================================
+//============================================================================================================
 // MEMORY
-//===============================================================================
+//============================================================================================================
 
 typedef struct mem_info {
-    u64 mem_total; //Total usable memory
-    u64 mem_free;  //The amount of physical memory not used by the system
-    u64 mem_avail; //An estimate of how much memory is available for starting new applications, without swapping.
-    u64 cached;    //Memory in the pagecache (Diskcache and Shared Memory)
-    u64 swap_cached;//Memory that is present within main memory, but also in the swapfile. (If memory is needed this area does not need to be swapped out AGAIN because it is already in the swapfile. This saves I/O and increases performance if machine runs short on memory.)
+
+    //Total usable memory
+    u64 mem_total;
+
+    //The amount of physical memory not used by the system
+    u64 mem_free;
+
+    //An estimate of how much memory is available for starting new applications, without swapping.
+    u64 mem_avail;
+
+    //Memory in the pagecache (Diskcache and Shared Memory)
+    u64 cached;
+
+    //Memory that is present within main memory, but also in the swapfile.
+    //(If memory is needed this area does not need to be swapped out AGAIN because it is already
+    // in the swapfile. This saves I/O and increases performance if machine runs short on memory.)
+    u64 swap_cached;
+
     u64 swap_total;
     u64 swap_free;
 } mem_info_t;
@@ -4037,9 +4034,9 @@ static void mem_info_get(mem_info_t** mem_info) {
     list_release(pairs, true);
 }
 
-//===============================================================================
+//============================================================================================================
 // GUI
-//===============================================================================
+//============================================================================================================
 #define NCOLOR_PAIR_WHITE_ON_BLACK  1
 #define NCOLOR_PAIR_GREEN_ON_BLACK  2
 #define NCOLOR_PAIR_CYAN_ON_BLACK   3
@@ -4443,10 +4440,12 @@ void ncurses_window() {
         row++;
 
         char hwversion_s[128] = {0};
-        sprintf(hwversion_s, "HWMonitor %d.%d%d", HW_VERSION_MAJOR, HW_VERSION_MINOR_A, HW_VERSION_MINOR_B);
+        sprintf(hwversion_s, "HWMonitor %d.%d%d", HW_VERSION_MAJOR, HW_VERSION_MINOR_A,
+                HW_VERSION_MINOR_B);
         mvaddstr(row++, 1, hwversion_s);
 
-        mvaddstr(row++, 1, "Keypad: [UP - Increase sample rate][DOWN - Decrease sample rate][F10 Exit]");
+        mvaddstr(row++, 1,
+                 "Keypad: [UP - Increase sample rate][DOWN - Decrease sample rate][F10 Exit]");
 
         char samplesize_s[128] = {0};
         sprintf(samplesize_s, "Sample rate %05.3f sec", device_get_sample_rate());
@@ -4701,9 +4700,9 @@ static void check_style_defines() {
 #endif
 }
 
-//===============================================================================
+//============================================================================================================
 // BLOCK DEVICE SAMPLING
-//===============================================================================
+//============================================================================================================
 
 static void blkdev_get(list_t** devs) {
     string* basedir = NULL;
@@ -4738,8 +4737,8 @@ static void blkdev_get(list_t** devs) {
         char* mount = string_makez(dev->mount);
         char* uuid = string_makez(dev->uuid);
         char* label = string_makez(dev->label);
-        LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
-                          "[mount=%s][uuid=%s][label=%s]\n",
+        LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s]"
+                          "[model=%s][mount=%s][uuid=%s][label=%s]\n",
                   (void*)dev, name, syspath,
                   dev->size, dev->used, dev->avail, dev->use, dev->perc,
                   fs, model, mount, uuid, label
@@ -4814,16 +4813,16 @@ void* start_blkdev_sample(void* p) {
 #ifndef NDEBUG
         blkdev_sample(sample_rate, NULL);
 #else
-        devices_sample(sample_rate, NULL);
+        blkdev_sample(sample_rate, NULL);
 #endif
     }
 
     return p;
 }
 
-//===============================================================================
+//============================================================================================================
 // NET DEVICE SAMPLING
-//===============================================================================
+//============================================================================================================
 
 static void net_dev_get(list_t** devs) {
     list_init(devs, &net_dev_release_cb);
@@ -4893,9 +4892,9 @@ void* start_net_dev_sample(void* p) {
     return p;
 }
 
-//===============================================================================
+//============================================================================================================
 // CPU PROC SAMPLING
-//===============================================================================
+//============================================================================================================
 static void cpu_dev_sample(double sample_size_sec) {
     cpu_dev_t* cpu_a = NULL;
     cpu_dev_t* cpu_b = NULL;
@@ -4940,9 +4939,9 @@ void* start_cpu_dev_sample(void* p) {
     return p;
 }
 
-//===============================================================================
+//============================================================================================================
 // MEM INFO SAMPLING
-//===============================================================================
+//============================================================================================================
 static void mem_info_sample(double sample_size_sec) {
 
     pthread_mutex_lock(&mem_info_mtx);
@@ -4974,9 +4973,9 @@ void* start_mem_info_sample(void* p) {
     return p;
 }
 
-//===============================================================================
-// Misc
-//===============================================================================
+//============================================================================================================
+// MISC
+//============================================================================================================
 
 void sig_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
@@ -4993,9 +4992,9 @@ void sig_handler(int signo) {
 
 
 
-//=======================================================================================
+//============================================================================================================
 // MAIN
-//=======================================================================================
+//============================================================================================================
 
 int main() {
 
@@ -5021,7 +5020,7 @@ int main() {
 
 #ifndef NDEBUG
     check_style_defines();
-    //tests_run();
+    tests_run();
 #endif
 
     pthread_mutex_init(&ldevices_mtx, NULL);

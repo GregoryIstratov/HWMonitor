@@ -1,4 +1,4 @@
-**HWMonitor v0.01**
+**HWMonitor v0.04**
 
 This little program uses ncurses to show gathered information from various sources of your Linux system like disks R/W speed, disks transactions, networks Tx/Rx Speed, packages,  memory usage, commits in memory, cached/buffered/swapped memory. About your CPU per core load, and so on.
 
@@ -10,4 +10,4 @@ The programm written in pure C11 and almost doesn't use external libs except cor
 All you need is Linux, compiler and some core libs like ncurses, which probably is already installed. 
 
 
-**Tested on Arch Linux with gcc 6.2.1**
+**Tested on Arch Linux x86_64 (kernel 4.8.13) with gcc 6.2.1/clang 3.9.0, glibc - 2.24**
