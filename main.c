@@ -193,7 +193,7 @@ static void _log(FILE* out, ...)
 #define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
 #define LOG_WARN(...) (_log(__FILE__, __LINE__, __func__, LOG_WARN, __VA_ARGS__))
 #define LOG_DEBUG(...) ((void)0)
-#define LOG_INFO(...) ((void)0)
+#define LOG_INFO(...) (_log(__FILE__, __LINE__, __func__, LOG_INFO, __VA_ARGS__))
 #define LOG_TRACE(...) ((void)0)
 #define LOG_ASSERT(...) ((void)0)
 #define ASSERT(exp) ((void)0)
@@ -434,7 +434,10 @@ static void ht_destroy(hashtable_t* ht) {
     }
 
     free((void*)ht->bin_size);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
     free((void*)ht->bin_locks);
+#pragma clang diagnostic pop
     free((void*)ht->table);
     free(ht);
 }
@@ -1488,12 +1491,13 @@ static ret_t list_traverse(list_t* l, bool forward, list_traverse_cb cb) {
     return ST_OK;
 }
 
-void test_list_traverse(list_node_t* node) {
+#ifndef NDEBUG
+static void test_list_traverse(list_node_t* node) {
     u64 i = *((u64*)node->data);
     LOG_TRACE("list elem %lu", i);
 }
 
-void test_list() {
+static void test_list() {
     static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
     list_t* l = NULL;
     list_init(&l, NULL);
@@ -1662,6 +1666,7 @@ void test_list() {
     ASSERT(l2 == NULL);
 }
 
+#endif
 
 //============================================================================================================
 // REGEX
@@ -1762,7 +1767,7 @@ static ret_t string_append(string* s, const char* str) {
 }
 
 static ret_t string_appendf(string* s, const char* fmt, ...) {
-    static const u64 FORMAT_BUFFER_SIZE = 4096;
+#define FORMAT_BUFFER_SIZE 4096
     va_list args;
     va_start(args, fmt);
 
@@ -1773,10 +1778,11 @@ static ret_t string_appendf(string* s, const char* fmt, ...) {
     va_end(args);
 
     return string_append(s, buf);
+#undef FORMAT_BUFFER_SIZE
 }
 
 static ret_t string_append_se(string* s, const char* start, const char* end) {
-    u64 sz = end - start;
+    u64 sz = (u64)(end - start);
     return da_append(_da(s), start, sz);
 }
 
@@ -2007,7 +2013,7 @@ static ret_t string_to_u64(string* s, u64* ul) {
     u64 res = 0;
     u64 ssize = string_size(s);
     for (u64 i = 0; i < ssize; ++i)
-        res = res * 10 + string_char(s, i) - '0';
+        res = res * 10UL + (u64)(string_char(s, i) - '0');
 
     *ul = res;
 
@@ -2020,7 +2026,7 @@ typedef struct string_pair {
     string* second;
 } string_pair_t;
 
-void string_pair_release_cb(void* p) {
+static void string_pair_release_cb(void* p) {
     if (!p)
         return;
 
@@ -2046,13 +2052,13 @@ static ret_t string_re_search(string* s, const char* pattern, list_t** pairs) {
     const char* tkp = _da(s)->ptr;
     const char* p = _da(s)->ptr;
     /* "N_matches" is the maximum number of matches allowed. */
-    const int n_matches = 10;
+#define n_matches 10
     /* "M" contains the matches found. */
     regmatch_t m[n_matches];
 
     while (1) {
         m[0].rm_so = 0;
-        m[0].rm_eo = string_size(s) - (p - tkp);
+        m[0].rm_eo = (int)(string_size(s) - (u64)(p - tkp));
         int nomatch = regexec(&re, p, n_matches, m, REG_STARTEND);
         if (nomatch) {
             LOG_INFO("No more matches.");
@@ -2066,14 +2072,14 @@ static ret_t string_re_search(string* s, const char* pattern, list_t** pairs) {
                     break;
                 }
 
-                start = m[i].rm_so + (p - tkp);
-                finish = m[i].rm_eo + (p - tkp);
+                start = m[i].rm_so + (int)(p - tkp);
+                finish = m[i].rm_eo + (int)(p - tkp);
                 if (i == 0) {
                     continue;
                 } else {
                     string* val;
                     string_init(&val);
-                    string_appendn(val, tkp + start, (finish - start));
+                    string_appendn(val, tkp + start, (u64)(finish - start));
 
                     list_push(*pairs, val);
                 }
@@ -2087,7 +2093,7 @@ static ret_t string_re_search(string* s, const char* pattern, list_t** pairs) {
     regfree(&re);
 
     return ST_OK;
-
+#undef n_matches
 }
 
 #define string_print(a) LOG_INFO("%.*s", string_size(a), string_cdata(a));
@@ -2230,7 +2236,8 @@ static ret_t fifo_release(fifo_t* l, bool data_release) {
 
 }
 
-void test_fifo() {
+#ifndef NDEBUG
+static void test_fifo() {
     static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
 
     fifo_t* f = NULL;
@@ -2255,6 +2262,8 @@ void test_fifo() {
     fifo_release(f, false);
 
 }
+
+#endif
 
 //============================================================================================================
 // GENERIC LIFO
@@ -2330,7 +2339,9 @@ static ret_t lifo_release(lifo_t* l, bool data_release) {
 
 }
 
-void test_lifo() {
+#ifndef NDEBUG
+
+static void test_lifo() {
     static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
 
     lifo_t* f = NULL;
@@ -2355,6 +2366,8 @@ void test_lifo() {
     lifo_release(f, false);
 
 }
+
+#endif
 
 //============================================================================================================
 // SLIST
@@ -2399,7 +2412,7 @@ static void slist_rfprintd(list_t* sl) {
     }
 }
 
-string* slist_next(list_iter_t* it) {
+static string* slist_next(list_iter_t* it) {
     return (string*)list_iter_next(it);
 }
 
@@ -2636,6 +2649,7 @@ static ret_t bt_release(binary_tree_t* bt, bool release_data) {
     return ST_OK;
 }
 
+#ifndef NDEBUG
 
 //simple char*:int froentend
 
@@ -2687,10 +2701,13 @@ static void bt_si_traverse(binary_tree_t* bt) {
     bt_node_traverse(bt->head, &bt_si_traverse_cb);
 }
 
+#endif
+
 //============================================================================================================
 // TESTS
 //============================================================================================================
 
+#ifndef NDEBUG
 
 static ret_t test_split();
 
@@ -2951,6 +2968,8 @@ static ret_t test_split() {
 
 }
 
+#endif
+
 //============================================================================================================
 
 
@@ -3125,7 +3144,7 @@ enum {
     HR_SIZE_GB
 };
 
-void human_readable_size(u64 bytes, double* result, int* type) {
+static void human_readable_size(u64 bytes, double* result, int* type) {
 
     double r = bytes / 1024.;
     if (r < 1024)  // KB / sec
@@ -3460,7 +3479,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
 
         const char* p = tkp;
         /* "N_matches" is the maximum number of matches allowed. */
-        const int n_matches = 5;
+#define n_matches 5
         /* "M" contains the matches found. */
         regmatch_t m[n_matches];
         while (1) {
@@ -3479,7 +3498,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
                 if (m[i].rm_so == -1) {
                     break;
                 }
-
+#undef n_matches
                 start = (int)(m[i].rm_so + (p - tkp));
                 finish = (int)(m[i].rm_eo + (p - tkp));
                 if (i == 0) {
@@ -3487,7 +3506,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
                 }
                 if (i == 1) {
                     string_init(&key);
-                    string_appendn(key, tkp + start, (finish - start));
+                    string_appendn(key, tkp + start, (u64)(finish - start));
                     ss_kv->key = key;
 
                 } else if (i == 2) {
@@ -3495,7 +3514,7 @@ static void sblk_callback(void* ctx, list_t* lines) {
                     if (finish - start != 0) {
 
                         string_init(&val);
-                        string_appendn(val, tkp + start, (finish - start));
+                        string_appendn(val, tkp + start, (u64)(finish - start));
                         ss_kv->val = val;
 
                         list_push(pairs, ss_kv);
@@ -4107,7 +4126,7 @@ static void ncruses_print_hr(int row, int col, u64 value) {
     mvaddstr(row, col, buffer);
 }
 
-void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier) {
+static void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier) {
 
     double r = bytes / 1024.0;
     if (r < 1024)  // KB / sec
@@ -4167,7 +4186,7 @@ void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier)
     }
 }
 
-void* ncurses_keypad(void* p) {
+static void* ncurses_keypad(void* p) {
     int c;
     while (1) {
         c = wgetch(stdscr);
@@ -4175,7 +4194,6 @@ void* ncurses_keypad(void* p) {
             case KEY_F(10):
                 atomic_store(&programm_exit, true);
                 return p;
-                break;
             case KEY_UP:
                 atomic_fetch_add(&sample_rate_mul, 1);
                 break;
@@ -4197,8 +4215,6 @@ void* ncurses_keypad(void* p) {
                 break;
         }
     }
-
-    return p;
 }
 
 static const char* animation_bug() {
@@ -4384,7 +4400,7 @@ static void ncurses_cpu_bar_render(int row, int col) {
 
 }
 
-void ncurses_addstrf(int row, int col, const char* fmt, ...) {
+static void ncurses_addstrf(int row, int col, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
 
@@ -4397,7 +4413,7 @@ void ncurses_addstrf(int row, int col, const char* fmt, ...) {
     mvaddstr(row, col, buf);
 }
 
-void ncurses_window() {
+static void ncurses_window() {
     initscr();            /* Start curses mode 		  */
 
     if (has_colors() == FALSE) {
@@ -4640,63 +4656,63 @@ void ncurses_window() {
 
 static void check_style_defines() {
 #ifdef _POSIX_SOURCE
-    LOG_TRACE("_POSIX_SOURCE defined");
+    LOG_DEBUG("_POSIX_SOURCE defined");
 #endif
 
 #ifdef _POSIX_C_SOURCE
-    LOG_TRACE("_POSIX_C_SOURCE defined: %ldL", (long)_POSIX_C_SOURCE);
+    LOG_DEBUG("_POSIX_C_SOURCE defined: %ldL", (long)_POSIX_C_SOURCE);
 #endif
 
 #ifdef _ISOC99_SOURCE
-    LOG_TRACE("_ISOC99_SOURCE defined");
+    LOG_DEBUG("_ISOC99_SOURCE defined");
 #endif
 
 #ifdef _ISOC11_SOURCE
-    LOG_TRACE("_ISOC11_SOURCE defined\n");
+    LOG_DEBUG("_ISOC11_SOURCE defined\n");
 #endif
 
 #ifdef _XOPEN_SOURCE
-    LOG_TRACE("_XOPEN_SOURCE defined: %d\n", _XOPEN_SOURCE);
+    LOG_DEBUG("_XOPEN_SOURCE defined: %d\n", _XOPEN_SOURCE);
 #endif
 
 #ifdef _XOPEN_SOURCE_EXTENDED
-    LOG_TRACE("_XOPEN_SOURCE_EXTENDED defined\n");
+    LOG_DEBUG("_XOPEN_SOURCE_EXTENDED defined\n");
 #endif
 
 #ifdef _LARGEFILE64_SOURCE
-    LOG_TRACE("_LARGEFILE64_SOURCE defined\n");
+    LOG_DEBUG("_LARGEFILE64_SOURCE defined\n");
 #endif
 
 #ifdef _FILE_OFFSET_BITS
-    LOG_TRACE("_FILE_OFFSET_BITS defined: %d\n", _FILE_OFFSET_BITS);
+    LOG_DEBUG("_FILE_OFFSET_BITS defined: %d\n", _FILE_OFFSET_BITS);
 #endif
 
 #ifdef _BSD_SOURCE
-    LOG_TRACE("_BSD_SOURCE defined\n");
+    LOG_DEBUG("_BSD_SOURCE defined\n");
 #endif
 
 #ifdef _SVID_SOURCE
-    LOG_TRACE("_SVID_SOURCE defined\n");
+    LOG_DEBUG("_SVID_SOURCE defined\n");
 #endif
 
 #ifdef _ATFILE_SOURCE
-    LOG_TRACE("_ATFILE_SOURCE defined\n");
+    LOG_DEBUG("_ATFILE_SOURCE defined\n");
 #endif
 
 #ifdef _GNU_SOURCE
-    LOG_TRACE("_GNU_SOURCE defined\n");
+    LOG_DEBUG("_GNU_SOURCE defined\n");
 #endif
 
 #ifdef _REENTRANT
-    LOG_TRACE("_REENTRANT defined\n");
+    LOG_DEBUG("_REENTRANT defined\n");
 #endif
 
 #ifdef _THREAD_SAFE
-    LOG_TRACE("_THREAD_SAFE defined\n");
+    LOG_DEBUG("_THREAD_SAFE defined\n");
 #endif
 
 #ifdef _FORTIFY_SOURCE
-    LOG_TRACE("_FORTIFY_SOURCE defined\n");
+    LOG_DEBUG("_FORTIFY_SOURCE defined\n");
 #endif
 }
 
@@ -4807,7 +4823,7 @@ static void blkdev_sample(double sample_size_sec, sampled_device_cb cb) {
 
 }
 
-void* start_blkdev_sample(void* p) {
+static void* start_blkdev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -4879,7 +4895,7 @@ static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
 
 }
 
-void* start_net_dev_sample(void* p) {
+static void* start_net_dev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -4926,7 +4942,7 @@ static void cpu_dev_sample(double sample_size_sec) {
     cpu_dev_release_cb(cpu_b);
 }
 
-void* start_cpu_dev_sample(void* p) {
+static void* start_cpu_dev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -4960,7 +4976,7 @@ static void mem_info_sample(double sample_size_sec) {
 #endif
 }
 
-void* start_mem_info_sample(void* p) {
+static void* start_mem_info_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -4977,7 +4993,7 @@ void* start_mem_info_sample(void* p) {
 // MISC
 //============================================================================================================
 
-void sig_handler(int signo) {
+static void sig_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
         atomic_store(&programm_exit, true);
     }

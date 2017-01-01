@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.6)
+
 project(HWMonitor)
 
 add_definitions(-D_GNU_SOURCE)
@@ -6,23 +7,34 @@ add_definitions(-D_GNU_SOURCE)
 
 #set(VALGRIND_ENABLE 1)
 
+set(SOURCE_FILES main.c)
+
+if(NOT "${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
+    message(FATAL_ERROR "Primary compiler is Clang, other compilers is not allowed")
+endif()
+
+set(DIAGNOSTIC_FLAGS "-Weverything -Werror -Wno-unused-function -Wno-unused-macros -Wno-unused-parameter -Wno-format-nonliteral")
+
 if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
     message("Building Debug verision...")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11 -O0 -g -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-function -Wno-unused-parameter -Werror")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mtune=native -std=gnu11 -O0 -g  ${DIAGNOSTIC_FLAGS}")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer")
     #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=leak")
     #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
+    add_executable(HWMonitor ${SOURCE_FILES})
 else()
     message("Building Release verision...")
     if (${VALGRIND_ENABLE})
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mtune=native -std=c11 -O2 -g -funroll-loops -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter -Werror")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mtune=native -std=gnu11 -O2 -g -funroll-loops ${DIAGNOSTIC_FLAGS}")
+        add_executable(HWMonitor ${SOURCE_FILES})
     else ()
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mtune=native -std=c11 -O3 -funroll-loops -pedantic-errors -Wall -Wpedantic -Wextra -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter -Werror")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--gc-sections -Wl,--strip-all")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mtune=native -std=gnu11 -O3 -funroll-loops ${DIAGNOSTIC_FLAGS}")
+        add_executable(HWMonitor ${SOURCE_FILES})
+        SET_TARGET_PROPERTIES(HWMonitor PROPERTIES LINK_FLAGS -Wl,-s)
     endif ()
 
 endif()
 
-set(SOURCE_FILES main.c)
-add_executable(HWMonitor ${SOURCE_FILES})
+
 target_link_libraries(HWMonitor ncurses pthread)
+
