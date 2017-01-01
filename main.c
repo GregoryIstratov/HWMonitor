@@ -33,12 +33,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <locale.h>
 #include <math.h>
 #include <stdlib.h>
-
-//external
-//#include <blkid/blkid.h> // apt install libblkid-dev
-#include <ncurses.h>     // apt install libncurses5-dev
 #include <asm/errno.h>
 #include <errno.h>
+
+//external
+//#include <blkid/blkid.h> // libblkid-dev
+#include <ncurses.h>     // libncurses5-dev
+
 
 
 
@@ -46,38 +47,86 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // SETTINGS
 //=======================================================================
 
-#define PTR_TO_U64(ptr) (uint64_t)(uint64_t*)(ptr)
-#define SAFE_RELEASE(x) { if(x){ zfree(x); (x) = NULL; } }
-
 #define HW_VERSION_MAJOR 0
 #define HW_VERSION_MINOR_A 0
 #define HW_VERSION_MINOR_B 4
-
 
 #define STRING_INIT_BUFFER 4
 
 #define DA_MAX_MULTIPLICATOR 4
 
+#define DEVICE_BASE_SAMPLE_RATE 0.01
+
+//===============================================================
+// GLOBAS
+//===============================================================
+#define PTR_TO_U64(ptr) (u64)(u64*)(ptr)
+#define SAFE_RELEASE(x) { if(x){ zfree(x); (x) = NULL; } }
+#define CHECK_RETURN(x) { if((x) != ST_OK) { LOG_ERROR("%s returns not ok", (#x)); } }
+
 #define KiB 1024UL
 #define MiB 1048576UL
 #define GiB 1073741824UL
 
-#define DEVICE_BASE_SAMPLE_RATE 0.01
 
 #define NANOSEC_IN_SEC      1000000000.0
 #define NANOSEC_IN_MILLISEC 1000000.0
+
+//global return codes
+enum {
+    ST_OK = 0UL,
+    ST_ERR,
+    ST_NOT_FOUND,
+    ST_EMPTY,
+    ST_EXISTS,
+    ST_OUT_OF_RANGE,
+    ST_SIZE_EXCEED,
+    ST_UNKNOWN
+};
+
+// global int defines, you should preffer 64 bit unsigned int
+typedef uint64_t u64;
+typedef uint32_t u32;
+typedef uint16_t u16;
+typedef uint8_t  u8;
+
+typedef _Atomic u64 atomic_u64;
+
+// global return code type
+typedef u64 ret_t;
+
+
+typedef void(* data_release_cb)(void* p);
+
+static void string_init_globals();
+
+static ret_t init_gloabls() {
+
+    string_init_globals();
+
+    return ST_OK;
+}
+
+static void string_shutdown_globals();
+
+static ret_t globals_shutdown() {
+
+    string_shutdown_globals();
+
+    return ST_OK;
+}
 
 //=======================================================================
 // TIMERS AND SLEEP
 //=======================================================================
 
-static struct timespec timer_start(){
+static struct timespec timer_start() {
     struct timespec start_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     return start_time;
 }
 
-static double timer_end_ms(struct timespec start_time){
+static double timer_end_ms(struct timespec start_time) {
     struct timespec end_time;
     clock_gettime(CLOCK_MONOTONIC, &end_time);
 
@@ -87,25 +136,22 @@ static double timer_end_ms(struct timespec start_time){
     return dns / NANOSEC_IN_MILLISEC;
 }
 
-static void nsleep(uint64_t nanoseconds)
-{
+static void nsleep(u64 nanoseconds) {
     struct timespec req;
 
-    req.tv_sec = (time_t)(nanoseconds/(uint64_t)NANOSEC_IN_SEC);
+    req.tv_sec = (time_t)(nanoseconds / (u64)NANOSEC_IN_SEC);
     req.tv_nsec = nanoseconds % (ulong)NANOSEC_IN_SEC;
 
-    struct timespec rem = {0,0};
+    struct timespec rem = {0, 0};
 
-    while(nanosleep(&req, &rem) == -1 && errno == EINTR)
-    {
+    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
         req = rem;
     }
 
 }
 
-static inline void nsleepd(double seconds)
-{
-    nsleep((uint64_t)(seconds * NANOSEC_IN_SEC));
+static inline void nsleepd(double seconds) {
+    nsleep((u64)(seconds * NANOSEC_IN_SEC));
 }
 
 //=======================================================================
@@ -115,7 +161,7 @@ static inline void nsleepd(double seconds)
 #define ENABLE_LOGGING
 
 #ifndef ENABLE_LOGGING
-#define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
+                                                                                                                        #define LOG_ERROR(...) (_log(stderr, __VA_ARGS__))
 #define LOG_WARN(...) (_log(stdout, __VA_ARGS__))
 #define LOG_DEBUG(...) (_log(stdout, __VA_ARGS__))
 #define LOG_INFO(...) (_log(stdout, __VA_ARGS__))
@@ -149,7 +195,7 @@ static void _log(FILE* out, ...)
 #define ASSERT(exp) ((exp)?__ASSERT_VOID_CAST (0): _log(__FILE__, __LINE__, __func__, LOG_ASSERT, #exp))
 #define ASSERT_EQ(a, b) ((a == b)?__ASSERT_VOID_CAST (0): LOG_ASSERT("%s != %s [%lu] != [%lu]", #a, #b, a, b))
 #else
-#define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
+                                                                                                                        #define LOG_ERROR(...) (_log(__FILE__, __LINE__, __func__, LOG_ERROR, __VA_ARGS__))
 #define LOG_WARN(...) (_log(__FILE__, __LINE__, __func__, LOG_WARN, __VA_ARGS__))
 #define LOG_DEBUG(...) ((void)0)
 #define LOG_INFO(...) ((void)0)
@@ -166,7 +212,6 @@ static void _log(FILE* out, ...)
 #define LOG_ENABLE_MULTITHREADING
 
 #define LOG_FORMAT_BUFFER_MAX_SIZE 12400
-
 
 #define LOG_RED   "\x1B[31m"
 #define LOG_GRN   "\x1B[32m"
@@ -201,10 +246,10 @@ static pthread_spinlock_t stderr_spinlock;
 static pthread_spinlock_t stdout_spinlock;
 #endif
 
-static int loglevel = LOGLEVEL_DEBUG;
-static FILE *stdlog = NULL;
+static u64 loglevel = LOGLEVEL_DEBUG;
+static FILE* stdlog = NULL;
 
-static void log_init(int loglvl, const char *filename) {
+static void log_init(u64 loglvl, const char* filename) {
     loglevel = loglvl;
 #ifdef LOG_ENABLE_MULTITHREADING
     pthread_spin_init(&stderr_spinlock, 0);
@@ -214,10 +259,11 @@ static void log_init(int loglvl, const char *filename) {
 }
 
 static void log_shutdown() {
-    if (stdlog) fclose(stdlog);
+    if (stdlog)
+        fclose(stdlog);
 }
 
-static const char *loglevel_s(int lvl) {
+static const char* loglevel_s(u64 lvl) {
     switch (lvl) {
         case LOG_ERROR:
             return "ERR";
@@ -236,7 +282,7 @@ static const char *loglevel_s(int lvl) {
     }
 }
 
-static const char *log_color(int lvl) {
+static const char* log_color(u64 lvl) {
     switch (lvl) {
         case LOG_ERROR:
             return LOG_RED;
@@ -255,23 +301,22 @@ static const char *log_color(int lvl) {
     }
 }
 
-static void _log(const char *file, int line, const char *fun, int lvl, ...) {
+static void _log(const char* file, u64 line, const char* fun, u64 lvl, ...) {
     if (lvl <= loglevel) {
 
 #ifdef LOG_SHOW_THREAD
-        pid_t tid = syscall(__NR_gettid);
+        pid_t tid = (pid_t)syscall(__NR_gettid);
 #endif
 
         va_list args;
         va_start(args, lvl);
-        const char *fmt = va_arg(args, const char*);
+        const char* fmt = va_arg(args, const char*);
 
         char buf[LOG_FORMAT_BUFFER_MAX_SIZE];
         memset(buf, 0, LOG_FORMAT_BUFFER_MAX_SIZE);
         vsnprintf(buf, LOG_FORMAT_BUFFER_MAX_SIZE, fmt, args);
 
         va_end(args);
-
 
 #ifdef LOG_ENABLE_MULTITHREADING
         pthread_spin_lock(&stdout_spinlock);
@@ -280,8 +325,8 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
 #if defined LOG_SHOW_TIME || defined LOG_SHOW_DATE
         time_t t;
         struct tm _tml;
-        struct tm *tml;
-        if (time(&t) == (time_t) -1) {
+        struct tm* tml;
+        if (time(&t) == (time_t)-1) {
             LOG_ERROR("time return failed");
             return;
         }
@@ -299,13 +344,13 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
         fprintf(stdlog, "[%02d/%02d/%d]", tml->tm_mday, tml->tm_mon + 1, tml->tm_year - 100);
 #endif
 #ifdef LOG_SHOW_THREAD
-        fprintf(stdlog, "[0x%08x]", tid);
+        fprintf(stdlog, "[0x%08X]", tid);
 #endif
 
         fprintf(stdlog, "[%s][%s]: %s%s", loglevel_s(lvl), fun, buf, LOG_RESET);
 
 #ifdef LOG_SHOW_PATH
-        fprintf(stdlog, " - %s:%d", file, line);
+        fprintf(stdlog, " - %s:%lu", file, line);
 #endif
         fprintf(stdlog, "\n");
         fflush(stdlog);
@@ -318,85 +363,26 @@ static void _log(const char *file, int line, const char *fun, int lvl, ...) {
 }
 
 #endif // ENABLE_LOGGING
-//===============================================================
-// GLOBAS
-//===============================================================
-enum {
-    ST_OK = 0,
-    ST_ERR,
-    ST_NOT_FOUND,
-    ST_EMPTY,
-    ST_EXISTS,
-    ST_OUT_OF_RANGE,
-    ST_SIZE_EXCEED,
-    ST_UNKNOWN
-};
 
-
-typedef void(*data_release_cb)(void *p);
-
-//======================================================================================================================
-// RETURN MSG
-//======================================================================================================================
-// 64 bit
-
-typedef uint64_t ret_t;
-
-#define CHECK_RETURN(x) { if((x) != ST_OK) { LOG_ERROR("%s returns not ok", (#x)); } }
-
-
-//======================================================================================================================
-//
-//======================================================================================================================
-
-
-
-static const size_t size_npos = (size_t) -1;
-// init gloabls
-
-static void string_init_globals();
-
-static ret_t init_gloabls() {
-
-#ifdef RET_MULTITHREADED
-    pthread_spin_init(&gmsg_tab_lock, 0);
-#endif
-
-    string_init_globals();
-
-    return 0;
-}
-
-static void string_shutdown_globals();
-
-static ret_t globals_shutdown() {
-
-#ifdef RET_MULTITHREADED
-    pthread_spin_destroy(&gmsg_tab_lock);
-#endif
-
-    string_shutdown_globals();
-
-    return ST_OK;
-}
 
 //=======================================================================
 // CONCURENT HASH TABLE
 //=======================================================================
-typedef uint64_t(*ht_key_hasher)(void* key);
-typedef void(*ht_data_releaser)(void* key);
+typedef u64(* ht_key_hasher)(void* key);
+
+typedef void(* ht_data_releaser)(void* key);
 
 typedef struct _ht_item_t {
     void* key;
-    void *value;
-    uint64_t hash;
-    struct _ht_item_t *next;
+    void* value;
+    u64 hash;
+    struct _ht_item_t* next;
 } ht_item_t;
 
 typedef struct _hashtable_t {
-    uint64_t table_size;
-    atomic_ullong size;
-    uint64_t* bin_size;
+    u64 table_size;
+    atomic_u64 size;
+    u64* bin_size;
     ht_item_t** table;
     pthread_spinlock_t* bin_locks;
     ht_key_hasher hasher;
@@ -404,37 +390,40 @@ typedef struct _hashtable_t {
     ht_data_releaser value_releaser;
 } hashtable_t;
 
-static ret_t ht_init(hashtable_t **ht, uint64_t table_size, ht_key_hasher hasher, ht_data_releaser key_releaser, ht_data_releaser value_releaser) {
+static ret_t ht_init(hashtable_t** ht,
+                     u64 table_size,
+                     ht_key_hasher hasher,
+                     ht_data_releaser key_releaser,
+                     ht_data_releaser value_releaser) {
     *ht = calloc(sizeof(hashtable_t), 1);
     hashtable_t* pht = *ht;
     pht->table_size = table_size;
     pht->hasher = hasher;
     pht->key_releaser = key_releaser;
     pht->value_releaser = value_releaser;
-    pht->table = (ht_item_t**)calloc(table_size, sizeof(ht_item_t));
+    pht->table = (ht_item_t**)calloc(table_size, sizeof(ht_item_t*));
     pht->bin_locks = (pthread_spinlock_t*)calloc(table_size, sizeof(pthread_spinlock_t));
     atomic_store_explicit(&pht->size, 0, memory_order_relaxed);
-    pht->bin_size = (uint64_t*)calloc(table_size, sizeof(uint64_t));
+    pht->bin_size = (u64*)calloc(table_size, sizeof(u64));
 
-    for(uint64_t i = 0; i < table_size; ++i)
-    {
+    for (u64 i = 0; i < table_size; ++i) {
         pthread_spin_init(&pht->bin_locks[i], 0);
     }
 
     return ST_OK;
 }
 
-static void ht_destroy_item(hashtable_t* ht, ht_item_t *item) {
-    if(item) {
+static void ht_destroy_item(hashtable_t* ht, ht_item_t* item) {
+    if (item) {
         ht->key_releaser((item)->key);
         ht->value_releaser((item)->value);
         free(item);
     }
 }
 
-static void ht_destroy_items_line(hashtable_t *ht, ht_item_t *start_item) {
-    ht_item_t *next = start_item;
-    ht_item_t *tmp = NULL;
+static void ht_destroy_items_line(hashtable_t* ht, ht_item_t* start_item) {
+    ht_item_t* next = start_item;
+    ht_item_t* tmp = NULL;
     while (next) {
         tmp = next;
         next = next->next;
@@ -443,9 +432,8 @@ static void ht_destroy_items_line(hashtable_t *ht, ht_item_t *start_item) {
     }
 }
 
-
-static void ht_destroy(hashtable_t *ht) {
-    for (uint64_t i = 0; i < ht->table_size; ++i) {
+static void ht_destroy(hashtable_t* ht) {
+    for (u64 i = 0; i < ht->table_size; ++i) {
         ht_destroy_items_line(ht, ht->table[i]);
         pthread_spin_destroy(&ht->bin_locks[i]);
     }
@@ -456,15 +444,14 @@ static void ht_destroy(hashtable_t *ht) {
     free(ht);
 }
 
-
-static ret_t ht_set(hashtable_t *ht, void *key, void *value) {
-    uint64_t hash = ht->hasher(key);
-    size_t bin = hash % ht->table_size;
+static ret_t ht_set(hashtable_t* ht, void* key, void* value) {
+    u64 hash = ht->hasher(key);
+    u64 bin = hash % ht->table_size;
 
     pthread_spin_lock(&ht->bin_locks[bin]);
 
-    ht_item_t *item = ht->table[bin];
-    ht_item_t *prev = NULL;
+    ht_item_t* item = ht->table[bin];
+    ht_item_t* prev = NULL;
     while (item) {
         if (item->hash == hash)
             break;
@@ -473,13 +460,12 @@ static ret_t ht_set(hashtable_t *ht, void *key, void *value) {
         item = item->next;
     }
 
-
     if (item && item->hash == hash) {
         ht->value_releaser(item->value);
         item->value = value;
         free(key);
     } else {
-        ht_item_t *new_item = NULL;
+        ht_item_t* new_item = NULL;
         if ((new_item = calloc(1, sizeof(ht_item_t))) == NULL) {
             pthread_spin_unlock(&ht->bin_locks[bin]);
 
@@ -505,12 +491,12 @@ static ret_t ht_set(hashtable_t *ht, void *key, void *value) {
     return ST_OK;
 }
 
-static ret_t ht_get(hashtable_t *ht, void *key, void **value) {
-    uint64_t hash = ht->hasher(key);
-    uint64_t bin = hash % ht->table_size;
+static ret_t ht_get(hashtable_t* ht, void* key, void** value) {
+    u64 hash = ht->hasher(key);
+    u64 bin = hash % ht->table_size;
 
     pthread_spin_lock(&ht->bin_locks[bin]);
-    ht_item_t *item = ht->table[bin];
+    ht_item_t* item = ht->table[bin];
 
     while (item) {
         if (item->hash == hash) {
@@ -528,40 +514,30 @@ static ret_t ht_get(hashtable_t *ht, void *key, void **value) {
     return ST_NOT_FOUND;
 }
 
-
-static ret_t ht_del(hashtable_t* ht, void* key)
-{
-    uint64_t hash = ht->hasher(key);
-    uint64_t bin = hash % ht->table_size;
+static ret_t ht_del(hashtable_t* ht, void* key) {
+    u64 hash = ht->hasher(key);
+    u64 bin = hash % ht->table_size;
 
     pthread_spin_lock(&ht->bin_locks[bin]);
 
-    ht_item_t *item = ht->table[bin];
-    ht_item_t *prev = NULL;
+    ht_item_t* item = ht->table[bin];
+    ht_item_t* prev = NULL;
     while (item) {
-        if ((item)->hash == hash)
-        {
+        if ((item)->hash == hash) {
 
-            if(prev && (item)->next)
-            {
+            if (prev && (item)->next) {
                 prev->next = (item)->next;
                 ht_destroy_item(ht, item);
-            }
-            else if(prev)
-            {
+            } else if (prev) {
                 prev->next = NULL;
                 ht_destroy_item(ht, item);
-            }
-            else if(item->next)
-            {
+            } else if (item->next) {
                 ASSERT_EQ(item, ht->table[bin]);
 
                 ht->table[bin] = item->next;
 
                 ht_destroy_item(ht, item);
-            }
-            else
-            {
+            } else {
                 ASSERT_EQ(item, ht->table[bin]);
                 ht_destroy_item(ht, item);
                 ht->table[bin] = NULL;
@@ -582,26 +558,21 @@ static ret_t ht_del(hashtable_t* ht, void* key)
     return ST_NOT_FOUND;
 }
 
-
-static uint64_t ht_size(hashtable_t* ht)
-{
+static u64 ht_size(hashtable_t* ht) {
     return atomic_load(&ht->size);
 }
 
-static uint64_t ht_table_size(hashtable_t* ht)
-{
+static u64 ht_table_size(hashtable_t* ht) {
     return ht->table_size;
 }
 
-static uint64_t ht_bin_size(hashtable_t* ht, uint64_t bin)
-{
-    if(bin >= ht->table_size)
-    {
+static u64 ht_bin_size(hashtable_t* ht, u64 bin) {
+    if (bin >= ht->table_size) {
         LOG_ERROR("out of range");
         return 0;
     }
 
-    uint64_t size = 0;
+    u64 size = 0;
     pthread_spin_lock(&ht->bin_locks[bin]);
 
     size = ht->bin_size[bin];
@@ -611,11 +582,9 @@ static uint64_t ht_bin_size(hashtable_t* ht, uint64_t bin)
     return size;
 }
 
-static ret_t ht_hist_dump_csv(hashtable_t* ht, const char* filename)
-{
+static ret_t ht_hist_dump_csv(hashtable_t* ht, const char* filename) {
     FILE* f = fopen(filename, "w");
-    if(!f)
-    {
+    if (!f) {
         char* err = strerror(errno);
         LOG_ERROR("can't open the file %s, error=", filename, err);
         free(err);
@@ -627,8 +596,7 @@ static ret_t ht_hist_dump_csv(hashtable_t* ht, const char* filename)
 
     char* s = buff;
 
-    for(uint64_t i = 0; i < ht->table_size; ++i)
-    {
+    for (u64 i = 0; i < ht->table_size; ++i) {
         int n = sprintf(s, "%lu,%lu\n", i, ht_bin_size(ht, i));
         s += n;
     }
@@ -640,12 +608,12 @@ static ret_t ht_hist_dump_csv(hashtable_t* ht, const char* filename)
     return ST_OK;
 }
 
-typedef void(*ht_foreach_cb)(uint64_t,void*,void*,void*);
+typedef void(* ht_foreach_cb)(u64, void*, void*, void*);
 
-static ret_t ht_foreach(hashtable_t *ht, ht_foreach_cb cb, void* ctx) {
-    for (size_t i = 0; i < ht->table_size; ++i) {
+static ret_t ht_foreach(hashtable_t* ht, ht_foreach_cb cb, void* ctx) {
+    for (u64 i = 0; i < ht->table_size; ++i) {
         pthread_spin_lock(&ht->bin_locks[i]);
-        ht_item_t *next = ht->table[i];
+        ht_item_t* next = ht->table[i];
         while (next) {
             cb(next->hash, next->key, next->value, ctx);
             next = next->next;
@@ -659,84 +627,70 @@ static ret_t ht_foreach(hashtable_t *ht, ht_foreach_cb cb, void* ctx) {
 //===============================================================
 // ALLOCATORS
 //===============================================================
-static uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
+static u64 crc64(u64 crc, const u8* s, u64 l);
 
 static hashtable_t* g_alloc_ht = NULL;
 
-typedef struct alloc_info
-{
-    uint64_t ptr;
-    uint64_t size;
-    uint64_t allocated;
+typedef struct alloc_info {
+    u64 ptr;
+    u64 size;
+    u64 allocated;
 } alloc_info_t;
 
-static void common_release_cb(void* p)
-{
+static void common_release_cb(void* p) {
     free(p);
 }
 
-static uint64_t crc64i(uint64_t* i)
-{
+static u64 crc64i(u64* i) {
     return crc64(0, (uint8_t*)i, 8);
 }
 
-static uint64_t ht_hasher_u64(void* i)
-{
-    return crc64i((uint64_t*)i);
+static u64 ht_hasher_u64(void* i) {
+    return crc64i((u64*)i);
 }
 
-
-static ret_t alloc_set_info(void* p, uint64_t size, uint64_t allocated)
-{
+static ret_t alloc_set_info(void* p, u64 size, u64 allocated) {
     alloc_info_t* info = (alloc_info_t*)calloc(1, sizeof(alloc_info_t));
     info->allocated = allocated;
     info->ptr = PTR_TO_U64(p);
     info->size = size;
 
-    uint64_t* key = (uint64_t*)calloc(1, sizeof(uint64_t));
+    u64* key = (u64*)calloc(1, sizeof(u64));
     *key = PTR_TO_U64(p);
 
     return ht_set(g_alloc_ht, key, info);
 }
 
-
-static ret_t alloc_del_info(void* p)
-{
-    uint64_t pi = PTR_TO_U64(p);
+static ret_t alloc_del_info(void* p) {
+    u64 pi = PTR_TO_U64(p);
 
     return ht_del(g_alloc_ht, &pi);
 }
 
-static void alloc_summary_cb(uint64_t hash, void* key, void* value, void* ctx)
-{
-    uint64_t* allocated = (uint64_t*)ctx;
+static void alloc_summary_cb(u64 hash, void* key, void* value, void* ctx) {
+    u64* allocated = (u64*)ctx;
 
     *allocated += ((alloc_info_t*)value)->allocated;
 }
 
-static void alloc_dump_summary()
-{
-    uint64_t allocated = 0;
+static void alloc_dump_summary() {
+    u64 allocated = 0;
 
     ht_foreach(g_alloc_ht, &alloc_summary_cb, &allocated);
 
     LOG_DEBUG("Current allocated memory %lu bytes in %lu elements", allocated, ht_size(g_alloc_ht));
 }
 
-
-static ret_t init_allocators()
-{
+static ret_t init_allocators() {
     ht_init(&g_alloc_ht, 256, &ht_hasher_u64, &common_release_cb, &common_release_cb);
 
     return ST_OK;
 }
 
-#define safe_free(p) if(p) { zfree(p); p = NULL; }
-
 #ifdef NDEBUG
 
-static void *zalloc(size_t size) {
-    void *v = malloc(size);
+static void* zalloc(u64 size) {
+    void* v = malloc(size);
     if (v == NULL) {
         LOG_ERROR("malloc returns null pointer [size=%lu]. Trying again...", size);
         return zalloc(size);
@@ -753,8 +707,8 @@ static void *zalloc(size_t size) {
 
 #else
 
-static void* _zalloc(size_t size, uint64_t line, const char* fun) {
-    void *v = malloc(size);
+static void* _zalloc(u64 size, u64 line, const char* fun) {
+    void* v = malloc(size);
     if (v == NULL) {
         LOG_ERROR("malloc returns null pointer [size=%lu]. Trying again...", size);
         return _zalloc(size, line, fun);
@@ -762,16 +716,9 @@ static void* _zalloc(size_t size, uint64_t line, const char* fun) {
 
     memset(v, 0, size);
 
-    ret_t r = ST_OK;
-
-    r = alloc_set_info(v, size, size);
-
-    if(r != ST_OK)
-    {
+    if (alloc_set_info(v, size, size) != ST_OK) {
         _log(__FILE__, line, fun, LOG_ERROR, "Failed to set alloc info");
-    }
-    else
-    {
+    } else {
         _log(__FILE__, line, fun, LOG_TRACE, "Alloc info set [0x%lX]", PTR_TO_U64(v));
     }
 
@@ -779,26 +726,19 @@ static void* _zalloc(size_t size, uint64_t line, const char* fun) {
 
 }
 
-static void* _zrealloc(void* p, size_t size, uint64_t line, const char* fun) {
-    void *v = realloc(p, size);
+static void* _zrealloc(void* p, u64 size, u64 line, const char* fun) {
+    void* v = realloc(p, size);
 
-    ret_t r = ST_OK;
-
-    if(p != v) {
+    if (p != v) {
         if (alloc_del_info(p) == ST_OK) {
             _log(__FILE__, line, fun, LOG_TRACE, "[realloc] info free [0x%lX]", p);
         }
     }
 
-    if(v) {
-        r = alloc_set_info(v, size, size);
-
-        if(r != ST_OK)
-        {
+    if (v) {
+        if (alloc_set_info(v, size, size) != ST_OK) {
             _log(__FILE__, line, fun, LOG_ERROR, "[zrealloc] Failed to set alloc info");
-        }
-        else
-        {
+        } else {
             _log(__FILE__, line, fun, LOG_TRACE, "Alloc info set [0x%lX]", PTR_TO_U64(v));
         }
     }
@@ -807,23 +747,18 @@ static void* _zrealloc(void* p, size_t size, uint64_t line, const char* fun) {
 
 }
 
-static void _zfree(void* p, uint64_t line, const char* fun)
-{
-    if(!p) return;
+static void _zfree(void* p, u64 line, const char* fun) {
+    if (!p)
+        return;
 
-    if(alloc_del_info(p) != ST_OK)
-    {
+    if (alloc_del_info(p) != ST_OK) {
         _log(__FILE__, line, fun, LOG_ERROR, "alloc info not found [0x%lX]", p);
-    }
-    else
-    {
+    } else {
         _log(__FILE__, line, fun, LOG_TRACE, "alloc info free [0x%lX]", p);
     }
 
-
     free(p);
 }
-
 
 #define zalloc(p) _zalloc((p), __LINE__, __func__)
 #define zfree(p) _zfree((p), __LINE__, __func__)
@@ -831,11 +766,11 @@ static void _zfree(void* p, uint64_t line, const char* fun)
 
 #endif
 
-static void *mmove(void *dst, const void *src, size_t size) {
+static void* mmove(void* dst, const void* src, u64 size) {
     return memmove(dst, src, size);
 }
 
-static void *mcopy(void *dst, const void *src, size_t size) {
+static void* mcopy(void* dst, const void* src, u64 size) {
     return memcpy(dst, src, size);
 }
 
@@ -846,7 +781,7 @@ static void *mcopy(void *dst, const void *src, size_t size) {
 // CRC64
 //=======================================================================
 
-static const uint64_t crc64_tab[256] = {
+static const u64 crc64_tab[256] = {
         UINT64_C(0x0000000000000000), UINT64_C(0x7ad870c830358979),
         UINT64_C(0xf5b0e190606b12f2), UINT64_C(0x8f689158505e9b8b),
         UINT64_C(0xc038e5739841b68f), UINT64_C(0xbae095bba8743ff6),
@@ -977,20 +912,19 @@ static const uint64_t crc64_tab[256] = {
         UINT64_C(0x536fa08fdfd90e51), UINT64_C(0x29b7d047efec8728),
 };
 
-static uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l) {
-    uint64_t j;
+static u64 crc64(u64 crc, const u8* s, u64 l) {
+    u64 j;
 
     for (j = 0; j < l; j++) {
-        uint8_t byte = s[j];
-        crc = crc64_tab[(uint8_t) crc ^ byte] ^ (crc >> 8);
+        u8 byte = s[j];
+        crc = crc64_tab[(u8)crc ^ byte] ^ (crc >> 8);
     }
     return crc;
 }
 
-
-static uint64_t crc64s(const char *str) {
-    uint64_t l = strlen(str);
-    return crc64(0, (const unsigned char *) str, l);
+static u64 crc64s(const char* str) {
+    u64 l = strlen(str);
+    return crc64(0, (const u8*)str, l);
 }
 
 
@@ -1003,16 +937,16 @@ static uint64_t crc64s(const char *str) {
 a, a->ptr, a->size, a->used, a->mul))
 
 typedef struct dynamic_allocator {
-    char *ptr;
-    size_t size;
-    size_t used;
-    size_t mul;
+    char* ptr;
+    u64 size;
+    u64 used;
+    u64 mul;
 
 } dynamic_allocator_t;
 
-static ret_t da_init(dynamic_allocator_t **a);
+static ret_t da_init(dynamic_allocator_t** a);
 
-static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
+static ret_t da_realloc(dynamic_allocator_t* a, u64 size) {
     if (a == NULL) {
         LOG_WARN("Empty dynamic_allocator::ptr");
         DA_TRACE(a);
@@ -1023,14 +957,14 @@ static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
     if (a->size == size) {
         return ST_OK;
     } else if (size < a->size || size == 0) {
-        size_t ds = a->size - size;
+        u64 ds = a->size - size;
         memset(a->ptr + size, 0, ds);
         a->ptr = zrealloc(a->ptr, size);
         a->size = size;
         a->used = size;
         a->mul = 1;
     } else if (size > a->size) {
-        size_t ds = size - a->size;
+        u64 ds = size - a->size;
         a->ptr = zrealloc(a->ptr, size);
         memset(a->ptr + a->size, 0, ds);
         a->size = size;
@@ -1039,7 +973,7 @@ static ret_t da_realloc(dynamic_allocator_t *a, size_t size) {
     return ST_OK;
 }
 
-static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
+static ret_t da_init_n(dynamic_allocator_t** a, u64 size) {
     *a = zalloc(sizeof(dynamic_allocator_t));
 
     (*a)->ptr = zalloc(size);
@@ -1052,12 +986,12 @@ static ret_t da_init_n(dynamic_allocator_t **a, size_t size) {
     return ST_OK;
 }
 
-static ret_t da_init(dynamic_allocator_t **a) {
+static ret_t da_init(dynamic_allocator_t** a) {
 
     return da_init_n(a, STRING_INIT_BUFFER);
 }
 
-static ret_t da_release(dynamic_allocator_t *a) {
+static ret_t da_release(dynamic_allocator_t* a) {
     if (!a)
         return ST_EMPTY;
 
@@ -1065,21 +999,19 @@ static ret_t da_release(dynamic_allocator_t *a) {
         LOG_TRACE("a[0x%08lX] size=%lu used=%lu mul=%lu",
                   a->ptr, a->size, a->used, a->mul);
 
-        safe_free(a->ptr);
-        safe_free(a);
+        SAFE_RELEASE(a->ptr);
+        SAFE_RELEASE(a);
     }
 
     return ST_OK;;
 }
 
-static ret_t da_fit(dynamic_allocator_t *a) {
+static ret_t da_fit(dynamic_allocator_t* a) {
 
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-
     da_realloc(a, a->used);
-
 
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
@@ -1087,7 +1019,7 @@ static ret_t da_fit(dynamic_allocator_t *a) {
     return ST_OK;
 }
 
-static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
+static ret_t da_crop_tail(dynamic_allocator_t* a, u64 n) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; pos=%lu",
               a, a->ptr, a->size, a->used, a->mul, n);
 
@@ -1098,8 +1030,8 @@ static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
         return ST_OUT_OF_RANGE;
     }
 
-    size_t nsize = a->used - n;
-    char *newbuff = zalloc(nsize);
+    u64 nsize = a->used - n;
+    char* newbuff = zalloc(nsize);
     memcpy(newbuff, a->ptr + n, nsize);
     zfree(a->ptr);
     a->ptr = newbuff;
@@ -1112,7 +1044,7 @@ static ret_t da_crop_tail(dynamic_allocator_t *a, size_t n) {
     return ST_OK;
 }
 
-static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
+static ret_t da_pop_head(dynamic_allocator_t* a, u64 n) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; n=%lu",
               a, a->ptr, a->size, a->used, a->mul, n);
 
@@ -1132,14 +1064,14 @@ static ret_t da_pop_head(dynamic_allocator_t *a, size_t n) {
     return ST_OK;
 }
 
-static ret_t da_check_size(dynamic_allocator_t *a, size_t new_size) {
+static ret_t da_check_size(dynamic_allocator_t* a, u64 new_size) {
     if (a->size < a->used + new_size)
         da_realloc(a, a->used + new_size);
 
     return ST_OK;
 }
 
-static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
+static ret_t da_append(dynamic_allocator_t* a, const char* data, u64 size) {
 
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
@@ -1151,18 +1083,17 @@ static ret_t da_append(dynamic_allocator_t *a, const char *data, size_t size) {
     mcopy(a->ptr + a->used, data, size);
     a->used += size;
 
-
     LOG_TRACE("e a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
     return ST_OK;
 }
 
-static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_allocator_t **b) {
+static ret_t da_sub(dynamic_allocator_t* a, u64 begin, u64 end, dynamic_allocator_t** b) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; input begin=%lu end=%lu",
               a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-    size_t ssize = end - begin;
+    u64 ssize = end - begin;
     if (ssize > a->used) {
 
         LOG_WARN("a=[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu and end=%lu out of range",
@@ -1184,12 +1115,11 @@ static ret_t da_sub(dynamic_allocator_t *a, size_t begin, size_t end, dynamic_al
 
 }
 
-
-static ret_t da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
+static ret_t da_dub(dynamic_allocator_t* a, dynamic_allocator_t** b) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu",
               a, a->ptr, a->size, a->used, a->mul);
 
-    size_t b_size = a->used;
+    u64 b_size = a->used;
     da_init_n(b, b_size);
     da_append(*b, a->ptr, b_size);
 
@@ -1202,14 +1132,14 @@ static ret_t da_dub(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     return ST_OK;
 }
 
-static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
+static ret_t da_merge(dynamic_allocator_t* a, dynamic_allocator_t** b) {
     DA_TRACE(a);
     DA_TRACE((*b));
 
     da_fit(a);
     da_fit(*b);
 
-    size_t nb_size = a->size + (*b)->size;
+    u64 nb_size = a->size + (*b)->size;
 
     da_realloc(a, nb_size);
 
@@ -1226,14 +1156,14 @@ static ret_t da_merge(dynamic_allocator_t *a, dynamic_allocator_t **b) {
     return ST_OK;
 }
 
-static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+static ret_t da_concant(dynamic_allocator_t* a, dynamic_allocator_t* b) {
     DA_TRACE(a);
     DA_TRACE(b);
 
     da_fit(a);
     da_fit(b);
 
-    size_t nb_size = a->size + b->size;
+    u64 nb_size = a->size + b->size;
 
     da_realloc(a, nb_size);
 
@@ -1241,24 +1171,23 @@ static ret_t da_concant(dynamic_allocator_t *a, dynamic_allocator_t *b) {
 
     a->used += b->size;
 
-
     DA_TRACE(a);
     DA_TRACE(b);
 
     return ST_OK;
 }
 
-static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
+static ret_t da_remove(dynamic_allocator_t* a, u64 begin, u64 end) {
     LOG_TRACE("b a[0x%08lX] ptr=[0x%08lX] size=%lu used=%lu mul=%lu; begin=%lu end=%lu",
               a, a->ptr, a->size, a->used, a->mul, begin, end);
 
-    size_t dsize = end - begin;
+    u64 dsize = end - begin;
     if (dsize > a->used) {
         LOG_WARN("begin(%lu) + end(%lu) >= total used(%lu) bytes", begin, end, a->used);
         return ST_SIZE_EXCEED;
     }
 
-    dynamic_allocator_t *b = NULL;
+    dynamic_allocator_t* b = NULL;
 
     da_sub(a, end, a->used, &b);
 
@@ -1274,31 +1203,30 @@ static ret_t da_remove(dynamic_allocator_t *a, size_t begin, size_t end) {
 
 }
 
-static ret_t da_compare(dynamic_allocator_t *a, dynamic_allocator_t *b) {
+static ret_t da_compare(dynamic_allocator_t* a, dynamic_allocator_t* b) {
     if (a->used < b->used)
         return ST_NOT_FOUND;
     else if (a->used > b->used)
         return ST_NOT_FOUND;
-    else if(memcmp(a->ptr, b->ptr, MIN(a->used, b->used)) == 0)
+    else if (memcmp(a->ptr, b->ptr, MIN(a->used, b->used)) == 0)
         return ST_OK;
 
     return ST_NOT_FOUND;
 }
 
-
-static ret_t da_comparez(dynamic_allocator_t *a, const char *b) {
-    size_t ssize = strlen(b);
-    return memcmp(a->ptr, b, MIN(a->used, ssize)) == 0? ST_OK : ST_NOT_FOUND;
+static ret_t da_comparez(dynamic_allocator_t* a, const char* b) {
+    u64 ssize = strlen(b);
+    return memcmp(a->ptr, b, MIN(a->used, ssize)) == 0 ? ST_OK : ST_NOT_FOUND;
 }
 
 static void test_da() {
-    dynamic_allocator_t *da = NULL;
-    dynamic_allocator_t *da2 = NULL;
-    dynamic_allocator_t *db = NULL;
-    dynamic_allocator_t *dc = NULL;
-    dynamic_allocator_t *dd = NULL;
-    dynamic_allocator_t *de = NULL;
-    dynamic_allocator_t *df = NULL;
+    dynamic_allocator_t* da = NULL;
+    dynamic_allocator_t* da2 = NULL;
+    dynamic_allocator_t* db = NULL;
+    dynamic_allocator_t* dc = NULL;
+    dynamic_allocator_t* dd = NULL;
+    dynamic_allocator_t* de = NULL;
+    dynamic_allocator_t* df = NULL;
 
     CHECK_RETURN(da_init(&da));
 
@@ -1361,7 +1289,6 @@ static void test_da() {
 
     CHECK_RETURN(da_concant(da, de));
 
-
     da_release(da);
     da = NULL;
 
@@ -1388,70 +1315,68 @@ static void test_da() {
 //=======================================================================
 
 typedef struct list_node {
-    void *data;
-    struct list_node *prev;
-    struct list_node *next;
+    void* data;
+    struct list_node* prev;
+    struct list_node* next;
 
 } list_node_t;
 
 typedef struct list {
-    list_node_t *head;
-    list_node_t *tail;
-    size_t size;
+    list_node_t* head;
+    list_node_t* tail;
+    u64 size;
     data_release_cb rel_cb;
 
 } list_t;
 
 typedef struct list_iter {
-    list_node_t *node;
+    list_node_t* node;
 } list_iter_t;
 
-
-static void list_iter_init(list_t *l, list_iter_t **it) {
+static void list_iter_init(list_t* l, list_iter_t** it) {
     *it = zalloc(sizeof(list_iter_t));
     (*it)->node = l->head;
 }
 
-static void list_iter_release(list_iter_t *it) {
-    safe_free(it);
+static void list_iter_release(list_iter_t* it) {
+    SAFE_RELEASE(it);
 }
 
-static void *list_iter_next(list_iter_t *it) {
+static void* list_iter_next(list_iter_t* it) {
     if (it->node == NULL)
         return NULL;
 
-    void *p = it->node->data;
+    void* p = it->node->data;
     it->node = it->node->next;
 
     return p;
 }
 
-
-static void list_init(list_t **l, data_release_cb cb) {
+static void list_init(list_t** l, data_release_cb cb) {
     *l = zalloc(sizeof(list_t));
     (*l)->rel_cb = cb;
 }
 
-static void list_node_init(list_node_t **node) {
+static void list_node_init(list_node_t** node) {
     *node = zalloc(sizeof(list_node_t));
 }
 
-static void list_push(list_t *l, void *s) {
+static void list_push(list_t* l, void* s) {
 
     if (!l->head) {
         list_node_init(&l->head);
 
-        list_node_t *node = l->head;
+        list_node_t* node = l->head;
 
         node->data = s;
 
         l->tail = l->head;
     } else {
-        list_node_t *node = NULL;
+        list_node_t* node = NULL;
         list_node_init(&node);
         node->data = s;
 
-        list_node_t *tail = l->head;
+        list_node_t* tail = l->head;
         while (tail->next) {
             tail = tail->next;
         }
@@ -1460,7 +1385,6 @@ static void list_push(list_t *l, void *s) {
 
         node->prev = tail;
 
-
         l->tail = node;
 
     }
@@ -1468,47 +1392,45 @@ static void list_push(list_t *l, void *s) {
     ++l->size;
 }
 
-static void *list_pop_head(list_t *l) {
+static void* list_pop_head(list_t* l) {
     if (l->size == 0)
         return NULL;
 
-    list_node_t *tmp = l->head;
+    list_node_t* tmp = l->head;
     l->head = tmp->next;
     l->size--;
 
-    void *data = tmp->data;
+    void* data = tmp->data;
     zfree(tmp);
 
     return data;
 }
 
-static void *list_crop_tail(list_t *l) {
+static void* list_crop_tail(list_t* l) {
     if (l->size == 0)
         return NULL;
 
-    list_node_t *tmp = l->tail;
+    list_node_t* tmp = l->tail;
     l->tail = tmp->prev;
     l->size--;
 
-    void *data = tmp->data;
+    void* data = tmp->data;
     zfree(tmp);
 
     return data;
 }
 
-static ret_t list_release(list_t *l, bool release_data) {
+static ret_t list_release(list_t* l, bool release_data) {
     if (!l)
         return ST_EMPTY;
 
-
-    list_node_t *head = l->head;
+    list_node_t* head = l->head;
     while (head) {
 
-        list_node_t *tmp = head;
+        list_node_t* tmp = head;
 
         if (release_data)
             l->rel_cb(tmp->data);
-
 
         head = head->next;
 
@@ -1521,10 +1443,9 @@ static ret_t list_release(list_t *l, bool release_data) {
 
 }
 
-static ret_t list_merge(list_t *a, list_t *b) {
+static ret_t list_merge(list_t* a, list_t* b) {
     if (a->size == 0 && b->size == 0)
         return ST_ERR;
-
 
     a->tail->next = b->head;
     b->head->prev = a->tail;
@@ -1535,13 +1456,13 @@ static ret_t list_merge(list_t *a, list_t *b) {
 }
 
 //TODO segfault
-static ret_t list_remove(list_t *l, const void *data) {
-    list_node_t *head = l->head;
+static ret_t list_remove(list_t* l, const void* data) {
+    list_node_t* head = l->head;
 
     while (head) {
         if (head->data == data) {
-            list_node_t *hn = head->next;
-            list_node_t *hp = head->prev;
+            list_node_t* hn = head->next;
+            list_node_t* hp = head->prev;
 
             hn->prev->next = hp;
             hp->next->prev = hn;
@@ -1559,14 +1480,13 @@ static ret_t list_remove(list_t *l, const void *data) {
     return (ST_NOT_FOUND);
 }
 
-typedef void(*list_traverse_cb)(list_node_t *);
+typedef void(* list_traverse_cb)(list_node_t*);
 
+static ret_t list_traverse(list_t* l, bool forward, list_traverse_cb cb) {
+    if (!l)
+        return ST_EMPTY;
 
-static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
-    if (!l) return ST_EMPTY;
-
-
-    list_node_t *cur = forward ? l->tail : l->head;
+    list_node_t* cur = forward ? l->tail : l->head;
 
     while (cur) {
         cb(cur);
@@ -1576,14 +1496,14 @@ static ret_t list_traverse(list_t *l, bool forward, list_traverse_cb cb) {
     return ST_OK;
 }
 
-void test_list_traverse(list_node_t *node) {
-    uint64_t i = *((uint64_t *) node->data);
+void test_list_traverse(list_node_t* node) {
+    u64 i = *((u64*)node->data);
     LOG_TRACE("list elem %lu", i);
 }
 
 void test_list() {
-    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
-    list_t *l = NULL;
+    static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    list_t* l = NULL;
     list_init(&l, NULL);
 
     ASSERT(l != NULL);
@@ -1602,10 +1522,10 @@ void test_list() {
     list_traverse(l, false, &test_list_traverse);
     list_traverse(l, true, &test_list_traverse);
 
-    list_node_t *head = l->tail;
-    size_t i = 7;
+    list_node_t* head = l->tail;
+    u64 i = 7;
     while (head) {
-        uint64_t *pi = (uint64_t *) head->data;
+        u64* pi = (u64*)head->data;
 
         LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
         ASSERT(ii[i] == *pi);
@@ -1615,7 +1535,7 @@ void test_list() {
     }
 
     i = 0;
-    uint64_t *pdata = NULL;
+    u64* pdata = NULL;
     while ((pdata = list_pop_head(l))) {
         LOG_TRACE("list elem i[%lu] = %lu", i, *pdata);
         ASSERT(ii[i] == *pdata);
@@ -1645,7 +1565,7 @@ void test_list() {
     head = l->head;
     i = 0;
     while (head) {
-        uint64_t *pi = (uint64_t *) head->data;
+        u64* pi = (u64*)head->data;
 
         LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
         ASSERT(ii[i] == *pi);
@@ -1653,7 +1573,6 @@ void test_list() {
         ++i;
         head = head->next;
     }
-
 
     i = 0;
     while ((pdata = list_pop_head(l))) {
@@ -1663,13 +1582,12 @@ void test_list() {
         ++i;
     }
 
-
     list_release(l, false);
     l = NULL;
     ASSERT(l == NULL);
 
 //// remove test failed
-//    list_init(&l, sizeof(uint64_t));
+//    list_init(&l, sizeof(u64));
 //
 //    ASSERT(l != NULL);
 //
@@ -1693,7 +1611,7 @@ void test_list() {
 //    head = l->head;
 //    while(head)
 //    {
-//        uint64_t* pi = (uint64_t*)head->data;
+//        u64* pi = (u64*)head->data;
 //
 //        LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
 //        ASSERT((*pi % 2) == 0);
@@ -1702,7 +1620,7 @@ void test_list() {
 //    }
 
 
-    list_t *l2 = NULL;
+    list_t* l2 = NULL;
     list_init(&l, NULL);
     list_init(&l2, NULL);
 
@@ -1718,14 +1636,12 @@ void test_list() {
     list_push(l2, &ii[6]);
     list_push(l2, &ii[7]);
 
-
     list_merge(l, l2);
-
 
     head = l->head;
     i = 0;
     while (head) {
-        uint64_t *pi = (uint64_t *) head->data;
+        u64* pi = (u64*)head->data;
 
         LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
         ASSERT(ii[i] == *pi);
@@ -1737,7 +1653,7 @@ void test_list() {
     head = l->tail;
     i = 7;
     while (head) {
-        uint64_t *pi = (uint64_t *) head->data;
+        u64* pi = (u64*)head->data;
 
         LOG_TRACE("list elem i[%lu] = %lu", i, *pi);
         ASSERT(ii[i] == *pi);
@@ -1761,10 +1677,7 @@ void test_list() {
 
 #define MAX_ERROR_MSG 0x1000
 
-/* Compile the regular expression described by "regex_text" into
-   "r". */
-
-static ret_t regex_compile(regex_t *r, const char *pattern) {
+static ret_t regex_compile(regex_t* r, const char* pattern) {
     int status = regcomp(r, pattern, REG_EXTENDED | REG_NEWLINE);
     if (status != 0) {
         char error_message[MAX_ERROR_MSG];
@@ -1777,7 +1690,7 @@ static ret_t regex_compile(regex_t *r, const char *pattern) {
     return ST_OK;
 }
 
-static bool regex_match(regex_t *r, const char *text) {
+static bool regex_match(regex_t* r, const char* text) {
     regmatch_t m[10];
     int nomatch = regexec(r, text, 10, m, 0);
     if (nomatch) {
@@ -1799,48 +1712,47 @@ typedef struct {
 
 } string;
 
-
-#define _da(x) ((dynamic_allocator_t*)x)
-#define _dap(x) ((dynamic_allocator_t**)x)
+#define _da(x) ((dynamic_allocator_t*)(x))
+#define _dap(x) ((dynamic_allocator_t**)(x))
 
 typedef struct skey_value {
-    string *key;
-    string *value;
+    string* key;
+    string* value;
 } skey_value_t;
 
-static string *string_null = NULL;
+static string* string_null = NULL;
 
-static ret_t string_init(string **sp) {
+static ret_t string_init(string** sp) {
     return da_init(_dap(sp));
 }
 
-static ret_t string_release(string *s) {
+static ret_t string_release(string* s) {
     return da_release(_da(s));
 }
 
-static void string_release_cb(void *p) {
-    string_release((string *) p);
+static void string_release_cb(void* p) {
+    string_release((string*)p);
 }
 
-static const char *string_cdata(string *s) {
+static const char* string_cdata(string* s) {
     return _da(s)->ptr;
 }
 
-static size_t string_size(string *s) {
+static u64 string_size(string* s) {
     return _da(s)->used;
 }
 
-static char string_char(string *s, size_t idx) {
+static char string_char(string* s, u64 idx) {
     if (idx > string_size(s)) {
         LOG_ERROR("Index is out of bound %lu > %lu", idx, string_size(s));
-        return (char) -1;
+        return (char)-1;
     }
 
     return _da(s)->ptr[idx];
 }
 
-static ret_t string_create_nt(string *s, char **buff) {
-    size_t ssize = string_size(s);
+static ret_t string_create_nt(string* s, char** buff) {
+    u64 ssize = string_size(s);
     *buff = zalloc(ssize + 1);
     memcpy(*buff, string_cdata(s), ssize);
 
@@ -1848,18 +1760,18 @@ static ret_t string_create_nt(string *s, char **buff) {
 }
 
 ///deep copy
-static ret_t string_dub(string *s, string **ns) {
+static ret_t string_dub(string* s, string** ns) {
     return da_dub(_da(s), _dap(ns));
 }
 
-static ret_t string_append(string *s, const char *str) {
-    size_t len = strlen(str);
+static ret_t string_append(string* s, const char* str) {
+    u64 len = strlen(str);
     return da_append(_da(s), str, len);
 
 }
 
-static ret_t string_appendf(string *s, const char *fmt, ...) {
-    static const size_t FORMAT_BUFFER_SIZE = 4096;
+static ret_t string_appendf(string* s, const char* fmt, ...) {
+    static const u64 FORMAT_BUFFER_SIZE = 4096;
     va_list args;
     va_start(args, fmt);
 
@@ -1872,8 +1784,8 @@ static ret_t string_appendf(string *s, const char *fmt, ...) {
     return string_append(s, buf);
 }
 
-static ret_t string_append_se(string *s, const char *start, const char *end) {
-    size_t sz = end - start;
+static ret_t string_append_se(string* s, const char* start, const char* end) {
+    u64 sz = end - start;
     return da_append(_da(s), start, sz);
 }
 
@@ -1887,75 +1799,76 @@ static void string_shutdown_globals() {
         string_release(string_null);
 }
 
-static char *string_makez(string *s) {
-    if (!s) return NULL;
+static char* string_makez(string* s) {
+    if (!s)
+        return NULL;
 
-    size_t sz = _da(s)->used;
-    char *data = zalloc(sz + 1);
+    u64 sz = _da(s)->used;
+    char* data = zalloc(sz + 1);
     memcpy(data, _da(s)->ptr, sz);
     return data;
 }
 
-static ret_t string_appendn(string *s, const char *str, size_t len) {
+static ret_t string_appendn(string* s, const char* str, u64 len) {
     return da_append(_da(s), str, len);
 
 }
 
-static ret_t string_create(string **s, const char *str) {
+static ret_t string_create(string** s, const char* str) {
     string_init(s);
 
     return string_append(*s, str);
 }
 
-static ret_t string_add(string *a, string *b) {
+static ret_t string_add(string* a, string* b) {
     return da_concant(_da(a), _da(b));
 }
 
-static ret_t string_pop_head(string *s, size_t n) {
+static ret_t string_pop_head(string* s, u64 n) {
     return da_pop_head(_da(s), n);
 }
 
-static ret_t string_crop_tail(string *s, size_t n) {
+static ret_t string_crop_tail(string* s, u64 n) {
     return da_crop_tail(_da(s), n);
 }
 
-static size_t string_find_last_char(string *s, char ch) {
-    size_t ssize = string_size(s);
-    for (size_t i = ssize; i != 0; --i) {
+static u64 string_find_last_char(string* s, char ch) {
+    u64 ssize = string_size(s);
+    for (u64 i = ssize; i != 0; --i) {
         char cur = string_char(s, i);
         if (cur == ch)
             return i;
     }
 
-    return size_npos;
+    return (u64)-1;
 
 }
 
-static ret_t string_remove_seq(string *s, size_t begin, size_t end) {
+static ret_t string_remove_seq(string* s, u64 begin, u64 end) {
     return da_remove(_da(s), begin, end);
 }
 
-static ret_t string_remove_dubseq(string *s, char delm, uint8_t skip) {
-    size_t j = 0;
+static ret_t string_remove_dubseq(string* s, char delm, uint8_t skip) {
+    u64 j = 0;
     while (j < string_size(s)) {
-        const char *cur = string_cdata(s);
+        const char* cur = string_cdata(s);
 
         if (cur[j] == delm) {
-            size_t begin = j;
-            size_t end = begin;
+            u64 begin = j;
+            u64 end = begin;
 
             while (cur[(++end)] == delm);
 
             //--end;// last compared position
-            size_t n = end - begin;
+            u64 n = end - begin;
 
             if (n > 1) {
 
-                size_t skip_ = 0;
+                u64 skip_ = 0;
                 if (skip >= n) {
                     LOG_WARN("skip value is too high. skip=%d", skip);
                 } else {
-                    skip_ = (size_t) skip;
+                    skip_ = (u64)skip;
                 }
 
                 CHECK_RETURN(string_remove_seq(s, begin, end - skip_));
@@ -1974,22 +1887,22 @@ static const char strip_dict[] = {'\0', '\n', '\r', '\t', ' ', '"', '\"', '\''};
 static const char strip_dict_ws[] = {'\0', '\n', '\r', '\t', ' '};
 
 static bool check_strip_dict(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
+    for (u64 i = 0; i < sizeof(strip_dict) / sizeof(char); ++i)
         if (ch == strip_dict[i])
             return true;
 
     return false;
 }
 
-static ret_t string_rstrip(string *s) {
+static ret_t string_rstrip(string* s) {
 
     if (string_size(s) < 1) {
         LOG_WARN("String size(%lu) is too small", string_size(s));
         return (ST_OUT_OF_RANGE);
     }
 
-    size_t n = 0;
-    for (size_t j = string_size(s) - 1; j != 0; --j) {
+    u64 n = 0;
+    for (u64 j = string_size(s) - 1; j != 0; --j) {
         char sch = string_char(s, j);
         if (check_strip_dict(sch))
             ++n;
@@ -2000,10 +1913,10 @@ static ret_t string_rstrip(string *s) {
     return string_pop_head(s, n);
 }
 
-static ret_t string_lstrip(string *s) {
+static ret_t string_lstrip(string* s) {
 
-    size_t n = 0;
-    for (size_t j = 0; j < string_size(s); ++j) {
+    u64 n = 0;
+    for (u64 j = 0; j < string_size(s); ++j) {
         char sch = string_char(s, j);
         if (check_strip_dict(sch))
             ++n;
@@ -2014,7 +1927,7 @@ static ret_t string_lstrip(string *s) {
     return string_crop_tail(s, n);
 }
 
-static ret_t string_strip(string *s) {
+static ret_t string_strip(string* s) {
 
     if (string_size(s) < 3)
         return ST_SIZE_EXCEED;
@@ -2026,17 +1939,17 @@ static ret_t string_strip(string *s) {
 }
 
 static bool check_strip_dict_ws(char ch) {
-    for (size_t i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
+    for (u64 i = 0; i < sizeof(strip_dict_ws) / sizeof(char); ++i)
         if (ch == strip_dict_ws[i])
             return true;
 
     return false;
 }
 
-static ret_t string_rstrip_ws(string *s) {
+static ret_t string_rstrip_ws(string* s) {
     while (string_size(s) > 2) {
 
-        size_t idx = string_size(s) - 1;
+        u64 idx = string_size(s) - 1;
         char sch = string_char(s, idx);
 
         if (check_strip_dict_ws(sch)) {
@@ -2050,8 +1963,8 @@ static ret_t string_rstrip_ws(string *s) {
     return ST_OK;
 }
 
-static ret_t string_starts_with(string *s, const char *str) {
-    size_t str_len = strlen(str);
+static ret_t string_starts_with(string* s, const char* str) {
+    u64 str_len = strlen(str);
     if (str_len > string_size(s))
         return (ST_SIZE_EXCEED);
 
@@ -2061,12 +1974,11 @@ static ret_t string_starts_with(string *s, const char *str) {
     return (ST_NOT_FOUND);
 }
 
-
-static bool string_re_match(string *s, const char *pattern) {
+static bool string_re_match(string* s, const char* pattern) {
     regex_t re;
     regex_compile(&re, pattern);
 
-    char *text = string_makez(s);
+    char* text = string_makez(s);
     bool m = regex_match(&re, text);
     zfree(text);
     regfree(&re);
@@ -2074,12 +1986,12 @@ static bool string_re_match(string *s, const char *pattern) {
     return m;
 }
 
-static ret_t string_compare(string *a, string *b) {
+static ret_t string_compare(string* a, string* b) {
     return da_compare(_da(a), _da(b));
 }
 
-static ret_t string_comparez(string *a, const char *str) {
-    size_t ssize = strlen(str);
+static ret_t string_comparez(string* a, const char* str) {
+    u64 ssize = strlen(str);
     if (_da(a)->used > ssize)
         return ST_ERR;
     else if (_da(a)->used < ssize)
@@ -2092,8 +2004,8 @@ static ret_t string_comparez(string *a, const char *str) {
     }
 }
 
-static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, char **se) {
-    size_t ssize = string_size(s);
+static ret_t string_map_region(string* s, u64 beg, u64 end, char** sb, char** se) {
+    u64 ssize = string_size(s);
     if ((beg > 0 && beg <= ssize) && (end > 0 && end <= ssize)) {
         LOG_ERROR("Indexes are out of bound");
         return ST_OUT_OF_RANGE;
@@ -2105,15 +2017,15 @@ static ret_t string_map_region(string *s, size_t beg, size_t end, char **sb, cha
     return ST_OK;
 }
 
-static void string_map_string(string *s, char **sb, char **se) {
+static void string_map_string(string* s, char** sb, char** se) {
     string_map_region(s, 0, string_size(s), sb, se);
 }
 
-static ret_t string_to_u64(string *s, uint64_t *ul) {
+static ret_t string_to_u64(string* s, u64* ul) {
 
-    uint64_t res = 0;
-    size_t ssize = string_size(s);
-    for (size_t i = 0; i < ssize; ++i)
+    u64 res = 0;
+    u64 ssize = string_size(s);
+    for (u64 i = 0; i < ssize; ++i)
         res = res * 10 + string_char(s, i) - '0';
 
     *ul = res;
@@ -2123,22 +2035,25 @@ static ret_t string_to_u64(string *s, uint64_t *ul) {
 }
 
 typedef struct string_pair {
-    string *first;
-    string *second;
+    string* first;
+    string* second;
 } string_pair_t;
 
-void string_pair_release_cb(void *p) {
-    if (!p) return;
+void string_pair_release_cb(void* p) {
+    if (!p)
+        return;
 
-    string_pair_t *pair = (string_pair_t *) p;
+    string_pair_t* pair = (string_pair_t*)p;
 
-    if (pair->first) string_release(pair->first);
-    if (pair->second) string_release(pair->second);
+    if (pair->first)
+        string_release(pair->first);
+    if (pair->second)
+        string_release(pair->second);
 
     zfree(pair);
 }
 
-static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
+static ret_t string_re_search(string* s, const char* pattern, list_t** pairs) {
     regex_t re;
     ret_t ret;
     if ((ret = regex_compile(&re, pattern)) != ST_OK) {
@@ -2147,17 +2062,14 @@ static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
 
     list_init(pairs, &string_release_cb);
 
-
-
-    const char *tkp = _da(s)->ptr;
-    const char *p = _da(s)->ptr;
+    const char* tkp = _da(s)->ptr;
+    const char* p = _da(s)->ptr;
     /* "N_matches" is the maximum number of matches allowed. */
     const int n_matches = 10;
     /* "M" contains the matches found. */
     regmatch_t m[n_matches];
 
-
-    while(1) {
+    while (1) {
         m[0].rm_so = 0;
         m[0].rm_eo = string_size(s) - (p - tkp);
         int nomatch = regexec(&re, p, n_matches, m, REG_STARTEND);
@@ -2174,12 +2086,10 @@ static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
                 }
 
                 start = m[i].rm_so + (p - tkp);
-                finish = m[i].rm_eo+ (p - tkp);
+                finish = m[i].rm_eo + (p - tkp);
                 if (i == 0) {
                     continue;
-                }
-                else
-                {
+                } else {
                     string* val;
                     string_init(&val);
                     string_appendn(val, tkp + start, (finish - start));
@@ -2188,7 +2098,7 @@ static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
                 }
             }
 
-            p+= m[0].rm_eo;
+            p += m[0].rm_eo;
 
         }
     }
@@ -2204,15 +2114,14 @@ static ret_t string_re_search(string *s, const char *pattern, list_t **pairs) {
 #define string_printt(a) LOG_TRACE("%.*s", string_size(a), string_cdata(a));
 
 static void test_string() {
-    static const char *str1 = "Hello, World!";
-    static const char *str2 = "What's up, Dude?";
+    static const char* str1 = "Hello, World!";
+    static const char* str2 = "What's up, Dude?";
     ASSERT(sizeof(dynamic_allocator_t) == sizeof(string));
 
-    string *a = NULL;
-    string *b = NULL;
-    string *c = NULL;
-    string *d = NULL;
-
+    string* a = NULL;
+    string* b = NULL;
+    string* c = NULL;
+    string* d = NULL;
 
     CHECK_RETURN(string_init(&a));
     CHECK_RETURN(string_release(a));
@@ -2241,7 +2150,6 @@ static void test_string() {
 
     CHECK_RETURN(string_comparez(c, "abc"));
 
-
     CHECK_RETURN(string_create(&d, "aabccc____3_2_1   :::"));
     CHECK_RETURN(string_remove_dubseq(d, 'a', 0));
     CHECK_RETURN(string_remove_dubseq(d, 'b', 0));
@@ -2256,7 +2164,6 @@ static void test_string() {
     ASSERT(string_comparez(d, "b3_2_1") == ST_OK);
     string_print(d);
 
-
     string_release(a);
     string_release(b);
     string_release(c);
@@ -2269,45 +2176,43 @@ static void test_string() {
 //=======================================================================
 
 typedef struct fifo_node {
-    void *data;
-    struct fifo_node *next;
+    void* data;
+    struct fifo_node* next;
 
 } fifo_node_t;
 
 typedef struct fifo {
-    fifo_node_t *head;
-    fifo_node_t *top;
-    size_t size;
+    fifo_node_t* head;
+    fifo_node_t* top;
+    u64 size;
     data_release_cb rel_cb;
 
 } fifo_t;
 
-
-static void fifo_init(fifo_t **l, data_release_cb cb) {
+static void fifo_init(fifo_t** l, data_release_cb cb) {
     *l = zalloc(sizeof(fifo_t));
     (*l)->rel_cb = cb;
 }
 
-static void fifo_node_init(fifo_node_t **node) {
+static void fifo_node_init(fifo_node_t** node) {
     *node = zalloc(sizeof(fifo_node_t));
 }
 
-static void fifo_push(fifo_t *l, void *s) {
+static void fifo_push(fifo_t* l, void* s) {
 
     if (!l->head) {
         fifo_node_init(&l->head);
 
-        fifo_node_t *node = l->head;
+        fifo_node_t* node = l->head;
 
         node->data = s;
 
         l->top = l->head;
     } else {
-        fifo_node_t *node = NULL;
+        fifo_node_t* node = NULL;
         fifo_node_init(&node);
         node->data = s;
         l->top->next = node;
-
 
         l->top = node;
 
@@ -2316,40 +2221,38 @@ static void fifo_push(fifo_t *l, void *s) {
     ++l->size;
 }
 
-static void *fifo_pop(fifo_t *l) {
+static void* fifo_pop(fifo_t* l) {
     if (!l->head)
         return NULL;
 
-    fifo_node_t *tmp = l->head;
+    fifo_node_t* tmp = l->head;
     l->head = tmp->next;
     l->size--;
 
-    void *p = tmp->data;
-    safe_free(tmp);
+    void* p = tmp->data;
+    SAFE_RELEASE(tmp);
 
     return p;
 }
 
-static ret_t fifo_release(fifo_t *l, bool data_release) {
+static ret_t fifo_release(fifo_t* l, bool data_release) {
 
-    void *p = NULL;
+    void* p = NULL;
     while ((p = fifo_pop(l))) {
         if (data_release)
             l->rel_cb(p);
     }
 
-    safe_free(l);
-
+    SAFE_RELEASE(l);
 
     return ST_OK;
 
 }
 
 void test_fifo() {
-    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
 
-
-    fifo_t *f = NULL;
+    fifo_t* f = NULL;
     fifo_init(&f, NULL);
 
     fifo_push(f, &ii[0]);
@@ -2361,14 +2264,12 @@ void test_fifo() {
     fifo_push(f, &ii[6]);
     fifo_push(f, &ii[7]);
 
-
-    uint64_t *p = NULL;
-    uint64_t i = 0;
-    while ((p = (uint64_t *) fifo_pop(f))) {
+    u64* p = NULL;
+    u64 i = 0;
+    while ((p = (u64*)fifo_pop(f))) {
         ASSERT(ii[i++] == *p);
         LOG_TRACE("fifo %lu", *p);
     }
-
 
     fifo_release(f, false);
 
@@ -2379,42 +2280,40 @@ void test_fifo() {
 //=======================================================================
 
 typedef struct lifo_node {
-    void *data;
-    struct lifo_node *prev;
+    void* data;
+    struct lifo_node* prev;
 
 } lifo_node_t;
 
 typedef struct lifo {
-    lifo_node_t *head;
-    size_t size;
+    lifo_node_t* head;
+    u64 size;
     data_release_cb rel_cb;
 
 } lifo_t;
 
-
-static void lifo_init(lifo_t **l, data_release_cb cb) {
+static void lifo_init(lifo_t** l, data_release_cb cb) {
     *l = zalloc(sizeof(lifo_t));
     (*l)->rel_cb = cb;
 }
 
-static void lifo_node_init(lifo_node_t **node) {
+static void lifo_node_init(lifo_node_t** node) {
     *node = zalloc(sizeof(lifo_node_t));
 }
 
-static void lifo_push(lifo_t *l, void *s) {
+static void lifo_push(lifo_t* l, void* s) {
 
     if (!l->head) {
         lifo_node_init(&l->head);
 
-        lifo_node_t *node = l->head;
+        lifo_node_t* node = l->head;
 
         node->data = s;
     } else {
-        lifo_node_t *node = NULL;
+        lifo_node_t* node = NULL;
         lifo_node_init(&node);
         node->data = s;
         node->prev = l->head;
-
 
         l->head = node;
     }
@@ -2422,40 +2321,38 @@ static void lifo_push(lifo_t *l, void *s) {
     ++l->size;
 }
 
-static void *lifo_pop(lifo_t *l) {
+static void* lifo_pop(lifo_t* l) {
     if (!l->head)
         return NULL;
 
-    lifo_node_t *tmp = l->head;
+    lifo_node_t* tmp = l->head;
     l->head = tmp->prev;
     l->size--;
 
-    void *p = tmp->data;
-    safe_free(tmp);
+    void* p = tmp->data;
+    SAFE_RELEASE(tmp);
 
     return p;
 }
 
-static ret_t lifo_release(lifo_t *l, bool data_release) {
+static ret_t lifo_release(lifo_t* l, bool data_release) {
 
-    void *p = NULL;
+    void* p = NULL;
     while ((p = lifo_pop(l))) {
         if (data_release)
             l->rel_cb(p);
     }
 
-    safe_free(l);
-
+    SAFE_RELEASE(l);
 
     return ST_OK;
 
 }
 
 void test_lifo() {
-    static uint64_t ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    static u64 ii[] = {0, 1, 2, 3, 4, 5, 6, 7};
 
-
-    lifo_t *f = NULL;
+    lifo_t* f = NULL;
     lifo_init(&f, NULL);
 
     lifo_push(f, &ii[0]);
@@ -2467,14 +2364,12 @@ void test_lifo() {
     lifo_push(f, &ii[6]);
     lifo_push(f, &ii[7]);
 
-
-    uint64_t *p = NULL;
-    uint64_t i = 7;
-    while ((p = (uint64_t *) lifo_pop(f))) {
+    u64* p = NULL;
+    u64 i = 7;
+    while ((p = (u64*)lifo_pop(f))) {
         ASSERT(ii[i--] == *p);
         LOG_TRACE("lifo %lu", *p);
     }
-
 
     lifo_release(f, false);
 
@@ -2484,16 +2379,16 @@ void test_lifo() {
 // SLIST
 //=======================================================================
 
-static void slist_fprintd(list_t *sl) {
+static void slist_fprintd(list_t* sl) {
 
     if (!sl) {
         LOG_WARN("sl == NULL");
         return;
     }
 
-    list_node_t *head = sl->head;
+    list_node_t* head = sl->head;
     while (head) {
-        string *s = (string *) head->data;
+        string* s = (string*)head->data;
 #ifdef NDEBUG
         string_print(s);
 #else
@@ -2504,17 +2399,16 @@ static void slist_fprintd(list_t *sl) {
     }
 }
 
-static void slist_rfprintd(list_t *sl) {
+static void slist_rfprintd(list_t* sl) {
     if (!sl) {
         LOG_WARN("sl == NULL");
         return;
     }
 
-
-    list_node_t *tail = sl->tail;
+    list_node_t* tail = sl->tail;
 
     while (tail) {
-        string *s = (string *) tail->data;
+        string* s = (string*)tail->data;
 #ifdef NDEBUG
         string_print(s);
 #else
@@ -2524,34 +2418,32 @@ static void slist_rfprintd(list_t *sl) {
     }
 }
 
-string *slist_next(list_iter_t *it) {
-    return (string *) list_iter_next(it);
+string* slist_next(list_iter_t* it) {
+    return (string*)list_iter_next(it);
 }
 
-static ret_t string_split(string *s, char delm, list_t **l) {
+static ret_t string_split(string* s, char delm, list_t** l) {
     if (string_size(s) == 0)
         return ST_EMPTY;
-
 
     string_rstrip_ws(s);
     string_remove_dubseq(s, delm, 1);
 
     list_init(l, &string_release_cb);
-    char *cb = NULL;
-    char *end = NULL;
-
+    char* cb = NULL;
+    char* end = NULL;
 
     string_map_string(s, &cb, &end);
-    char *ccur = cb;
+    char* ccur = cb;
 
     while (ccur <= end) {
         if (*ccur == delm || ccur == end) {
             //while(*(++ccur) == delm && ccur == end);
 
 
-            string *ss = NULL;
+            string* ss = NULL;
             string_init(&ss);
-            string_appendn(ss, cb, (size_t) (ccur - cb));
+            string_appendn(ss, cb, (u64)(ccur - cb));
 
             list_push(*l, ss);
 
@@ -2564,17 +2456,16 @@ static ret_t string_split(string *s, char delm, list_t **l) {
     return ST_OK;
 }
 
-
 //=======================================================================
 // GENERIC VECTOR
 //=======================================================================
 typedef struct vector {
-    dynamic_allocator_t *alloc;
-    size_t size;
-    size_t elem_size;
+    dynamic_allocator_t* alloc;
+    u64 size;
+    u64 elem_size;
 } vector_t;
 
-static ret_t vector_init(vector_t **vec, size_t elem_size) {
+static ret_t vector_init(vector_t** vec, u64 elem_size) {
     *vec = zalloc(sizeof(vector_t));
     da_init_n(&(*vec)->alloc, elem_size * 10);
     (*vec)->elem_size = elem_size;
@@ -2582,37 +2473,36 @@ static ret_t vector_init(vector_t **vec, size_t elem_size) {
     return ST_OK;
 }
 
-static ret_t vector_release(vector_t *vec) {
+static ret_t vector_release(vector_t* vec) {
     da_release(vec->alloc);
     zfree(vec);
 
     return ST_OK;
 }
 
-static size_t vector_size(vector_t *vec) { return vec->size; }
+static u64 vector_size(vector_t* vec) { return vec->size; }
 
-static ret_t vector_add(vector_t *vec, const void *elem) {
-    da_append(vec->alloc, (const char *) elem, vec->elem_size);
+static ret_t vector_add(vector_t* vec, const void* elem) {
+    da_append(vec->alloc, (const char*)elem, vec->elem_size);
     vec->size++;
 
     return ST_OK;
 }
 
-
-static ret_t vector_get(vector_t *vec, size_t idx, void **elem) {
+static ret_t vector_get(vector_t* vec, u64 idx, void** elem) {
     if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
-    *elem = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
+    *elem = (void*)&(vec->alloc->ptr[vec->elem_size * idx]);
 
     return ST_OK;
 }
 
-static ret_t vector_set(vector_t *vec, size_t idx, void *elem) {
+static ret_t vector_set(vector_t* vec, u64 idx, void* elem) {
     if (idx >= vec->size)
         return ST_OUT_OF_RANGE;
 
-    void *el = (void *) &(vec->alloc->ptr[vec->elem_size * idx]);
+    void* el = (void*)&(vec->alloc->ptr[vec->elem_size * idx]);
 
     memcpy(el, elem, vec->elem_size);
 
@@ -2620,12 +2510,12 @@ static ret_t vector_set(vector_t *vec, size_t idx, void *elem) {
 
 }
 
-typedef void(*vector_foreach_cb)(size_t, size_t, void *, void *);
+typedef void(* vector_foreach_cb)(u64, u64, void*, void*);
 
-static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
-    size_t n = vec->size;
-    for (size_t i = 0; i < n; ++i) {
-        void *v = (void *) &(vec->alloc->ptr[vec->elem_size * i]);
+static void vector_foreach(vector_t* vec, void* ctx, vector_foreach_cb cb) {
+    u64 n = vec->size;
+    for (u64 i = 0; i < n; ++i) {
+        void* v = (void*)&(vec->alloc->ptr[vec->elem_size * i]);
         cb(i, vec->elem_size, ctx, v);
     }
 }
@@ -2636,18 +2526,18 @@ static void vector_foreach(vector_t *vec, void *ctx, vector_foreach_cb cb) {
 //=============================================================================================
 
 typedef struct bt_node {
-    uint64_t hash_key;
-    void *data;
-    struct bt_node *prev;
-    struct bt_node *left;
-    struct bt_node *right;
+    u64 hash_key;
+    void* data;
+    struct bt_node* prev;
+    struct bt_node* left;
+    struct bt_node* right;
     data_release_cb rel_cb;
 
 } bt_node_t;
 
-static ret_t bt_node_create(bt_node_t **bt, uint64_t hash, void *data) {
+static ret_t bt_node_create(bt_node_t** bt, u64 hash, void* data) {
     *bt = zalloc(sizeof(bt_node_t));
-    bt_node_t *b = *bt;
+    bt_node_t* b = *bt;
     b->hash_key = hash;
 
     b->data = data;
@@ -2655,29 +2545,27 @@ static ret_t bt_node_create(bt_node_t **bt, uint64_t hash, void *data) {
     return ST_OK;
 }
 
-static ret_t bt_node_release(bt_node_t *bt, bool release_data) {
+static ret_t bt_node_release(bt_node_t* bt, bool release_data) {
 
     if (bt != NULL) {
 
         bt_node_release(bt->left, release_data);
         bt_node_release(bt->right, release_data);
 
-
         if (release_data)
             bt->rel_cb(bt->data);
 
-        safe_free(bt);
+        SAFE_RELEASE(bt);
 
     }
 
     return ST_OK;
 }
 
-
-static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *data, data_release_cb rel_cb) {
+static ret_t bt_node_set(bt_node_t** bt, bt_node_t* prev, u64 hash, void* data, data_release_cb rel_cb) {
     if (*bt == NULL) {
         *bt = zalloc(sizeof(bt_node_t));
-        bt_node_t *b = *bt;
+        bt_node_t* b = *bt;
         b->hash_key = hash;
         b->prev = prev;
         b->rel_cb = rel_cb;
@@ -2686,7 +2574,7 @@ static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *d
 
         return ST_OK;
     } else {
-        bt_node_t *b = *bt;
+        bt_node_t* b = *bt;
 
         if (b->hash_key > hash)
             return bt_node_set(&b->right, b, hash, data, rel_cb);
@@ -2694,7 +2582,8 @@ static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *d
             return bt_node_set(&b->left, b, hash, data, rel_cb);
         else {
 
-            if ((*bt)->rel_cb) (*bt)->rel_cb(b->data);
+            if ((*bt)->rel_cb)
+                (*bt)->rel_cb(b->data);
 
             b->data = data;
 
@@ -2704,8 +2593,7 @@ static ret_t bt_node_set(bt_node_t **bt, bt_node_t *prev, uint64_t hash, void *d
     }
 }
 
-
-static ret_t bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
+static ret_t bt_node_get(bt_node_t* bt, u64 hash, void** data) {
     if (bt == NULL)
         return ST_NOT_FOUND;
 
@@ -2719,8 +2607,8 @@ static ret_t bt_node_get(bt_node_t *bt, uint64_t hash, void **data) {
     }
 }
 
-static ret_t bt_node_left(bt_node_t *bt, bt_node_t **left) {
-    bt_node_t *cur = bt;
+static ret_t bt_node_left(bt_node_t* bt, bt_node_t** left) {
+    bt_node_t* cur = bt;
 
     while (cur && cur->left)
         cur = cur->left;
@@ -2730,10 +2618,11 @@ static ret_t bt_node_left(bt_node_t *bt, bt_node_t **left) {
     return ST_OK;
 }
 
-typedef void(*bt_node_traverse_cb)(bt_node_t *);
+typedef void(* bt_node_traverse_cb)(bt_node_t*);
 
-static void bt_node_traverse(bt_node_t *bt, bt_node_traverse_cb cb) {
-    if (bt == NULL) return;
+static void bt_node_traverse(bt_node_t* bt, bt_node_traverse_cb cb) {
+    if (bt == NULL)
+        return;
 
     bt_node_traverse(bt->left, cb);
     bt_node_traverse(bt->right, cb);
@@ -2744,24 +2633,23 @@ static void bt_node_traverse(bt_node_t *bt, bt_node_traverse_cb cb) {
 // froentends
 
 typedef struct binary_tree {
-    bt_node_t *head;
+    bt_node_t* head;
     data_release_cb rel_cb;
 } binary_tree_t;
 
-
-static ret_t bt_init(binary_tree_t **bt, data_release_cb cb) {
+static ret_t bt_init(binary_tree_t** bt, data_release_cb cb) {
     *bt = zalloc(sizeof(binary_tree_t));
     (*bt)->rel_cb = cb;
 
     return ST_OK;
 }
 
-static ret_t bt_release(binary_tree_t *bt, bool release_data) {
+static ret_t bt_release(binary_tree_t* bt, bool release_data) {
 
     if (bt != NULL) {
         bt_node_release(bt->head, release_data);
 
-        safe_free(bt);
+        SAFE_RELEASE(bt);
     }
 
     return ST_OK;
@@ -2771,51 +2659,50 @@ static ret_t bt_release(binary_tree_t *bt, bool release_data) {
 //simple char*:int froentend
 
 typedef struct str_int {
-    const char *str;
-    uint64_t i;
+    const char* str;
+    u64 i;
 } str_int_t;
 
-static str_int_t heap_str_int_decode(void *p) {
+static str_int_t heap_str_int_decode(void* p) {
     str_int_t i;
     memcpy(&i, p, sizeof(str_int_t));
 
     return i;
 }
 
-static ret_t bt_si_set(binary_tree_t *bt, const char *key, uint64_t i) {
-    uint64_t hash = crc64s(key);
-    str_int_t *data = zalloc(sizeof(str_int_t));
+static ret_t bt_si_set(binary_tree_t* bt, const char* key, u64 i) {
+    u64 hash = crc64s(key);
+    str_int_t* data = zalloc(sizeof(str_int_t));
     data->str = key;
     data->i = i;
     return bt_node_set(&bt->head, NULL, hash, data, bt->rel_cb);
 }
 
-static void bt_si_release(void *p) {
-    str_int_t *data = (str_int_t *) p;
+static void bt_si_release(void* p) {
+    str_int_t* data = (str_int_t*)p;
     zfree(data);
 }
 
-static ret_t bt_si_get(binary_tree_t *bt, const char *key, str_int_t **i) {
-    uint64_t hash = crc64s(key);
-    void *p = NULL;
+static ret_t bt_si_get(binary_tree_t* bt, const char* key, str_int_t** i) {
+    u64 hash = crc64s(key);
+    void* p = NULL;
     ret_t ret = bt_node_get(bt->head, hash, &p);
     if (ret != ST_OK)
         return ret;
 
-    *i = (str_int_t *) p;
+    *i = (str_int_t*)p;
 
     return ret;
 }
 
-static void bt_si_traverse_cb(bt_node_t *node) {
+static void bt_si_traverse_cb(bt_node_t* node) {
     static ret_t counter = 1;
     str_int_t i = heap_str_int_decode(node->data);
 
     LOG_DEBUG("[%d][%08lX] %s : 0x%lX", counter++, node->hash_key, i.str, i.i);
 }
 
-
-static void bt_si_traverse(binary_tree_t *bt) {
+static void bt_si_traverse(binary_tree_t* bt) {
     bt_node_traverse(bt->head, &bt_si_traverse_cb);
 }
 
@@ -2832,8 +2719,6 @@ static void test_da();
 
 static void test_string();
 
-
-
 static void tests_run() {
     test_da();
     test_string();
@@ -2846,8 +2731,8 @@ static void tests_run() {
 }
 
 static void test_hash_bt() {
-    binary_tree_t *bt;
-    str_int_t *node = NULL;
+    binary_tree_t* bt;
+    str_int_t* node = NULL;
     bt_init(&bt, &bt_si_release);
 
     bt_si_set(bt, "1", 1);
@@ -2865,7 +2750,6 @@ static void test_hash_bt() {
     bt_si_set(bt, "13", 0xD);
     bt_si_set(bt, "14", 0xE);
     bt_si_set(bt, "15", 0xF);
-
 
     bt_si_get(bt, "1", &node);
     ASSERT(node->i == 0x1);
@@ -2920,7 +2804,6 @@ static void test_hash_bt() {
     bt_si_get(bt, "15", &node);
     ASSERT(node->i == 0xF);
 
-
     bt_si_traverse(bt);
     bt_release(bt, true);
     bt_init(&bt, &bt_si_release);
@@ -2972,7 +2855,6 @@ static void test_hash_bt() {
     bt_si_get(bt, "15", &node);
     ASSERT(node->i == 0);
 
-
     bt_si_get(bt, "10", &node);
     node->i = 0xA;
     bt_si_get(bt, "11", &node);
@@ -3007,9 +2889,8 @@ static void test_hash_bt() {
 
 static ret_t test_split() {
 
-    string *text = NULL;
+    string* text = NULL;
     string_init(&text);
-
 
     string_append(text, "SIZE=\"240057409536\" MODEL=\"TOSHIBA-TR150   \" LABEL=\"\" UUID=\"\" MOUNTPOINT=\"\"\n");
     string_append(text,
@@ -3025,15 +2906,14 @@ static ret_t test_split() {
     string_append(text,
                   "NAME=\"sdb1\" FSTYPE=\"ext4\" SCHED=\"cfq\" SIZE=\"2000397868544\" MODEL=\"\" LABEL=\"\" UUID=\"cdc9e724-a78b-4a25-9647-ad6390e235c3\" MOUNTPOINT=\"\"\n");
 
-
-    list_t *blklist = NULL;
+    list_t* blklist = NULL;
     string_split(text, '\n', &blklist);
 
     LOG_TRACE("------- LINES OF TOKENS -----------");
     slist_fprintd(blklist);
 
-    string *tk = NULL;
-    list_iter_t *blkit = NULL;
+    string* tk = NULL;
+    list_iter_t* blkit = NULL;
     list_iter_init(blklist, &blkit);
 
     while ((tk = slist_next(blkit)) != NULL) {
@@ -3043,25 +2923,24 @@ static ret_t test_split() {
 
         LOG_TRACE("------- TOKEN SPLIT-----------");
 
-        list_t *tokens = NULL;
+        list_t* tokens = NULL;
         string_split(tk, ' ', &tokens);
 
         slist_fprintd(tokens);
 
-        string *s = NULL;
-        list_iter_t *token_it = NULL;
+        string* s = NULL;
+        list_iter_t* token_it = NULL;
         list_iter_init(blklist, &token_it);
 
         while ((s = slist_next(token_it)) != NULL) {
-            list_t *kv = NULL;
+            list_t* kv = NULL;
             string_split(s, '=', &kv);
 
             LOG_TRACE("------- TOKEN KEY-VALUE -----------");
             slist_fprintd(kv);
 
-
-            string *key = (string *) kv->head->data;
-            string *val = (string *) kv->head->next->data;
+            string* key = (string*)kv->head->data;
+            string* val = (string*)kv->head->next->data;
 
             string_strip(val);
 
@@ -3079,13 +2958,11 @@ static ret_t test_split() {
 
     }
 
-
     list_iter_release(blkit);
     list_release(blklist, true);
     blklist = NULL;
     string_release(text);
     text = NULL;
-
 
     return ST_OK;
 
@@ -3155,62 +3032,60 @@ enum {
 // FILE UTILS
 //===============================================================================
 
-static size_t get_sfile_size(const char *filename) {
+static u64 get_sfile_size(const char* filename) {
     struct stat st;
     stat(filename, &st);
-    return (size_t) st.st_size;
+    return (u64)st.st_size;
 }
 
-typedef void(*cmd_exec_cb)(void *, list_t *);
+typedef void(* cmd_exec_cb)(void*, list_t*);
 
-static void file_mmap_string(const char *filename, string *s) {
-    size_t filesize = get_sfile_size(filename);
+static void file_mmap_string(const char* filename, string* s) {
+    u64 filesize = get_sfile_size(filename);
     //Open file
     int fd = open(filename, O_RDONLY, 0);
 
     //Execute mmap
-    void *data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
 
     //Write the mmapped data
     string_init(&s);
-    string_appendn(s, (char *) data, filesize);
+    string_appendn(s, (char*)data, filesize);
 
     //Cleanup
     munmap(data, filesize);
     close(fd);
 }
 
-
-static size_t get_fd_file_size(int fd) {
+static u64 get_fd_file_size(int fd) {
     struct stat st;
     fstat(fd, &st);
-    return (size_t) st.st_size;
+    return (u64)st.st_size;
 }
 
-static void fd_file_mmap(int fd, string *s) {
-    size_t filesize = get_fd_file_size(fd);
+static void fd_file_mmap(int fd, string* s) {
+    u64 filesize = get_fd_file_size(fd);
 
     //Execute mmap
-    void *data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* data = mmap(NULL, filesize, PROT_READ, MAP_PRIVATE, fd, 0);
 
 
     //Write the mmapped data
     string_init(&s);
-    string_appendn(s, (char *) data, filesize);
+    string_appendn(s, (char*)data, filesize);
 
     //Cleanup
     munmap(data, filesize);
     close(fd);
 }
 
-
-static void file_read_all(const char *filename, char **buff, size_t *size) {
-    FILE *f = fopen(filename, "rb");
+static void file_read_all(const char* filename, char** buff, u64* size) {
+    FILE* f = fopen(filename, "rb");
     fseek(f, 0, SEEK_END);
-    size_t fsize = (size_t) ftell(f);
+    u64 fsize = (u64)ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    char *string = malloc(fsize);
+    char* string = malloc(fsize);
     fread(string, fsize, 1, f);
     fclose(f);
 
@@ -3218,10 +3093,10 @@ static void file_read_all(const char *filename, char **buff, size_t *size) {
     *size = fsize;
 }
 
-static void file_read_all_s(const char *filename, string *s) {
-    FILE *f = fopen(filename, "rb");
+static void file_read_all_s(const char* filename, string* s) {
+    FILE* f = fopen(filename, "rb");
     fseek(f, 0, SEEK_END);
-    size_t fsize = (size_t) ftell(f);
+    u64 fsize = (u64)ftell(f);
     fseek(f, 0, SEEK_SET);
 
     da_realloc(_da(s), fsize);
@@ -3230,10 +3105,11 @@ static void file_read_all_s(const char *filename, string *s) {
     fclose(f);
 }
 
-static int file_read_all_buffered_s(const char *filename, string *s) {
+static int file_read_all_buffered_s(const char* filename, string* s) {
 #define FILE_READ_ALL_BUFF_SIZE 1024
-    FILE *f = fopen(filename, "rb");
-    if (!f) return -1;
+    FILE* f = fopen(filename, "rb");
+    if (!f)
+        return -1;
 
     char buff[FILE_READ_ALL_BUFF_SIZE] = {0};
     da_realloc(_da(s), FILE_READ_ALL_BUFF_SIZE);
@@ -3247,12 +3123,11 @@ static int file_read_all_buffered_s(const char *filename, string *s) {
 #undef FILE_READ_ALL_BUFF_SIZE
 }
 
-static void file_read_line(const char *filename, string *s) {
-    FILE *f = fopen(filename, "rb");
+static void file_read_line(const char* filename, string* s) {
+    FILE* f = fopen(filename, "rb");
 
-
-    char *buff = NULL;
-    size_t size = 0;
+    char* buff = NULL;
+    u64 size = 0;
     getline(&buff, &size, f);
 
     string_append(s, buff);
@@ -3261,15 +3136,13 @@ static void file_read_line(const char *filename, string *s) {
     fclose(f);
 }
 
-
 enum {
     HR_SIZE_KB,
     HR_SIZE_MB,
     HR_SIZE_GB
 };
 
-
-void human_readable_size(uint64_t bytes, double *result, int *type) {
+void human_readable_size(u64 bytes, double* result, int* type) {
 
     double r = bytes / 1024.;
     if (r < 1024)  // KB / sec
@@ -3300,51 +3173,59 @@ void human_readable_size(uint64_t bytes, double *result, int *type) {
 //===============================================================================
 
 typedef struct blk_dev {
-    string *name;
+    string* name;
     //struct statvfs stats;
-    uint64_t stat[11];
+    u64 stat[11];
     double perf_read;
     double perf_write;
-    string *label;
-    uint64_t size;
-    uint64_t used;
-    uint64_t avail;
-    uint64_t use;
+    string* label;
+    u64 size;
+    u64 used;
+    u64 avail;
+    u64 use;
     double perc;
-    string *fs;
-    string *mount;
-    string *sysfolder;
-    string *model;
-    string *uuid;
-    string *shed;
+    string* fs;
+    string* mount;
+    string* sysfolder;
+    string* model;
+    string* uuid;
+    string* shed;
 } blk_dev_t;
 
-static void blk_dev_release_cb(void *p) {
-    blk_dev_t *dev = (blk_dev_t *) p;
+static void blk_dev_release_cb(void* p) {
+    blk_dev_t* dev = (blk_dev_t*)p;
 
-    if (dev->name) string_release(dev->name);
-    if (dev->label) string_release(dev->label);
-    if (dev->fs) string_release(dev->fs);
-    if (dev->mount) string_release(dev->mount);
-    if (dev->sysfolder) string_release(dev->sysfolder);
-    if (dev->model) string_release(dev->model);
-    if (dev->uuid) string_release(dev->uuid);
-    if (dev->shed) string_release(dev->shed);
+    if (dev->name)
+        string_release(dev->name);
+    if (dev->label)
+        string_release(dev->label);
+    if (dev->fs)
+        string_release(dev->fs);
+    if (dev->mount)
+        string_release(dev->mount);
+    if (dev->sysfolder)
+        string_release(dev->sysfolder);
+    if (dev->model)
+        string_release(dev->model);
+    if (dev->uuid)
+        string_release(dev->uuid);
+    if (dev->shed)
+        string_release(dev->shed);
 
     zfree(dev);
 }
 
-static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
-    list_iter_t *it = NULL;
+static blk_dev_t* blk_dev_list_search(list_t* devs, string* name) {
+    list_iter_t* it = NULL;
     list_iter_init(devs, &it);
 
-    blk_dev_t *dev;
+    blk_dev_t* dev;
     while ((dev = list_iter_next(it))) {
-        string *dev_devname = NULL;
+        string* dev_devname = NULL;
         string_create(&dev_devname, "/dev/");
         string_add(dev_devname, dev->name);
 
-        if(string_compare(dev_devname, name) == ST_OK) {
+        if (string_compare(dev_devname, name) == ST_OK) {
             string_release(dev_devname);
             break;
         }
@@ -3352,32 +3233,29 @@ static blk_dev_t *blk_dev_list_search(list_t *devs, string *name) {
         string_release(dev_devname);
     }
 
-
     list_iter_release(it);
 
     return dev;
 }
 
-static blk_dev_t *blk_dev_list_direct_search(list_t *devs, string *name) {
-    list_iter_t *it = NULL;
+static blk_dev_t* blk_dev_list_direct_search(list_t* devs, string* name) {
+    list_iter_t* it = NULL;
     list_iter_init(devs, &it);
 
-    blk_dev_t *dev;
+    blk_dev_t* dev;
     while ((dev = list_iter_next(it))) {
 
-
-        if(string_compare(dev->name, name) == ST_OK)
+        if (string_compare(dev->name, name) == ST_OK)
             break;
     }
 
-
     list_iter_release(it);
 
     return dev;
 }
 
-static void blk_dev_diff(blk_dev_t *a, blk_dev_t *b, double sample_size) {
-    static const uint64_t BLOCK_SIZE = 512; // Unix block size
+static void blk_dev_diff(blk_dev_t* a, blk_dev_t* b, double sample_size) {
+    static const u64 BLOCK_SIZE = 512; // Unix block size
 
     b->stat[WRITE_SECTORS] = b->stat[WRITE_SECTORS] - a->stat[WRITE_SECTORS];
     b->stat[READ_SECTORS] = b->stat[READ_SECTORS] - a->stat[READ_SECTORS];
@@ -3389,20 +3267,19 @@ static void blk_dev_diff(blk_dev_t *a, blk_dev_t *b, double sample_size) {
 //===============================================================================
 // CMD EXECUTOR
 //===============================================================================
-static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
-    FILE *fpipe;
+static ret_t cmd_execute(const char* cmd, void* ctx, cmd_exec_cb cb) {
+    FILE* fpipe;
 
     if (!(fpipe = popen(cmd, "r")))
         return ST_ERR;
 
     char line[1024] = {0};
 
-
-    list_t *sl;
+    list_t* sl;
     list_init(&sl, &string_release_cb);
 
     while (fgets(line, sizeof(line), fpipe)) {
-        string *s = NULL;
+        string* s = NULL;
 
         string_create(&s, line);
         list_push(sl, s);
@@ -3414,7 +3291,6 @@ static ret_t cmd_execute(const char *cmd, void *ctx, cmd_exec_cb cb) {
 
     return ST_OK;
 }
-
 
 //===============================================================================
 // df Utils
@@ -3428,64 +3304,57 @@ enum {
 
 };
 
-
 typedef struct df_stat {
-    string *dev;
+    string* dev;
 
-    uint64_t total;
-    uint64_t used;
-    uint64_t avail;
-    uint64_t use;
-
+    u64 total;
+    u64 used;
+    u64 avail;
+    u64 use;
 
 } df_stat_t;
 
 typedef struct {
-    list_t *devs;
-    uint64_t skip_first;
+    list_t* devs;
+    u64 skip_first;
 } df_t;
 
-
-static void df_init(list_t *devs, df_t **df) {
+static void df_init(list_t* devs, df_t** df) {
     *df = zalloc(sizeof(df_t));
     (*df)->devs = devs;
     (*df)->skip_first = 1;
 }
 
-
-static void df_callback(void *ctx, list_t *lines) {
-    df_t *df = (df_t *) ctx;
+static void df_callback(void* ctx, list_t* lines) {
+    df_t* df = (df_t*)ctx;
 
     LOG_TRACE("------- LINES OF TOKENS -----------");
     slist_fprintd(lines);
 
-    string *tk = NULL;
-    list_iter_t *line_it = NULL;
+    string* tk = NULL;
+    list_iter_t* line_it = NULL;
     list_iter_init(lines, &line_it);
     while ((tk = slist_next(line_it))) {
 
         LOG_TRACE("------- TOKEN LINE-----------");
         string_printt(tk);
 
-
         if (!string_re_match(tk, ".*(sd.*).*"))
             continue;
 
         LOG_TRACE("------- TOKEN SPLIT-----------");
 
-        list_t *tokens = NULL;
+        list_t* tokens = NULL;
         string_split(tk, ' ', &tokens);
 
         slist_fprintd(tokens);
 
-
-        list_iter_t *tk_it = NULL;
+        list_iter_t* tk_it = NULL;
         list_iter_init(tokens, &tk_it);
 
-
-        string *s = NULL;
-        uint64_t k = 0;
-        blk_dev_t *dev = NULL;
+        string* s = NULL;
+        u64 k = 0;
+        blk_dev_t* dev = NULL;
         while ((s = slist_next(tk_it)) != NULL) {
 
             string_strip(s);
@@ -3503,7 +3372,7 @@ static void df_callback(void *ctx, list_t *lines) {
                 case DFS_USED: {
                     string_to_u64(s, &dev->used);
                     if (dev->size)
-                        dev->perc = dev->used / (double) dev->size * 100.0;
+                        dev->perc = dev->used / (double)dev->size * 100.0;
                     break;
                 }
                 case DFS_AVAIL:
@@ -3531,12 +3400,11 @@ static void df_callback(void *ctx, list_t *lines) {
     list_iter_release(line_it);
     list_release(lines, true);
 
-
 }
 
-static void df_execute(df_t *dfs) {
+static void df_execute(df_t* dfs) {
 
-    const char *cmd = "df --block-size=1";
+    const char* cmd = "df --block-size=1";
     cmd_execute(cmd, dfs, &df_callback);
 }
 
@@ -3557,12 +3425,11 @@ enum {
 };
 
 typedef struct sblkid {
-    list_t *devs;
+    list_t* devs;
 } sblkid_t;
 
-
-static ret_t vector_add_kv(vector_t *vec, string *key, string *val) {
-    skey_value_t *kv = zalloc(sizeof(skey_value_t));
+static ret_t vector_add_kv(vector_t* vec, string* key, string* val) {
+    skey_value_t* kv = zalloc(sizeof(skey_value_t));
     string_dub(key, &kv->key);
     string_dub(val, &kv->value);
 
@@ -3571,27 +3438,24 @@ static ret_t vector_add_kv(vector_t *vec, string *key, string *val) {
     return ST_OK;
 }
 
-
 typedef struct string_string_pair {
-    string *key;
-    string *val;
+    string* key;
+    string* val;
 } ss_kv_t;
 
-
-static void ss_kv_release_cb(void *p) {
-    ss_kv_t *kv = (ss_kv_t *) p;
+static void ss_kv_release_cb(void* p) {
+    ss_kv_t* kv = (ss_kv_t*)p;
     string_release(kv->key);
     string_release(kv->val);
     zfree(kv);
 }
 
-static void sblk_callback(void *ctx, list_t *lines) {
+static void sblk_callback(void* ctx, list_t* lines) {
 
-    sblkid_t *sys = (sblkid_t *) ctx;
+    sblkid_t* sys = (sblkid_t*)ctx;
 
-
-    string *tk = NULL;
-    list_iter_t *ln_it = NULL;
+    string* tk = NULL;
+    list_iter_t* ln_it = NULL;
     list_iter_init(lines, &ln_it);
 
     while ((tk = slist_next(ln_it))) {
@@ -3604,14 +3468,14 @@ static void sblk_callback(void *ctx, list_t *lines) {
         regex_t re;
         regex_compile(&re, "(\\w+)=\"([[:alnum:][:space:]/-]*)\"");
 
-        char *tkp = NULL;
+        char* tkp = NULL;
         string_create_nt(tk, &tkp);
 
-        blk_dev_t *dev = NULL;
-        list_t *pairs = NULL;
+        blk_dev_t* dev = NULL;
+        list_t* pairs = NULL;
         list_init(&pairs, &ss_kv_release_cb);
 
-        const char *p = tkp;
+        const char* p = tkp;
         /* "N_matches" is the maximum number of matches allowed. */
         const int n_matches = 5;
         /* "M" contains the matches found. */
@@ -3623,9 +3487,9 @@ static void sblk_callback(void *ctx, list_t *lines) {
                 break;
             }
 
-            string *key = NULL;
-            string *val = NULL;
-            ss_kv_t *ss_kv = zalloc(sizeof(ss_kv_t));
+            string* key = NULL;
+            string* val = NULL;
+            ss_kv_t* ss_kv = zalloc(sizeof(ss_kv_t));
             for (int i = 0; i < n_matches; i++) {
                 int start;
                 int finish;
@@ -3633,8 +3497,8 @@ static void sblk_callback(void *ctx, list_t *lines) {
                     break;
                 }
 
-                start = (int) (m[i].rm_so + (p - tkp));
-                finish = (int) (m[i].rm_eo + (p - tkp));
+                start = (int)(m[i].rm_so + (p - tkp));
+                finish = (int)(m[i].rm_eo + (p - tkp));
                 if (i == 0) {
                     continue;
                 }
@@ -3658,7 +3522,6 @@ static void sblk_callback(void *ctx, list_t *lines) {
                     }
                 }
 
-
             }
             p += m[0].rm_eo;
         }
@@ -3668,12 +3531,11 @@ static void sblk_callback(void *ctx, list_t *lines) {
 
 
         //================================
-        list_iter_t *kv_it = NULL;
+        list_iter_t* kv_it = NULL;
         list_iter_init(pairs, &kv_it);
 
-        ss_kv_t *kv;
+        ss_kv_t* kv;
         while ((kv = list_iter_next(kv_it))) {
-
 
             string_printd(kv->key);
             string_printd(kv->val);
@@ -3721,24 +3583,22 @@ static void sblk_callback(void *ctx, list_t *lines) {
 
 }
 
-static ret_t sblk_execute(sblkid_t *sblk) {
-    static const char *options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
+static ret_t sblk_execute(sblkid_t* sblk) {
+    static const char* options[] = {"NAME", "FSTYPE", "SCHED", "SIZE", "MODEL", "LABEL", "UUID", "MOUNTPOINT"};
 
-    string *cmd = NULL;
+    string* cmd = NULL;
     string_create(&cmd, "lsblk -i -P -b -o ");
     string_append(cmd, options[0]);
 
-
-    size_t opt_size = sizeof(options) / sizeof(char *);
-    for (size_t i = 1; i < opt_size; ++i) {
+    u64 opt_size = sizeof(options) / sizeof(char*);
+    for (u64 i = 1; i < opt_size; ++i) {
         string_append(cmd, ",");
         string_append(cmd, options[i]);
     }
 
     string_append(cmd, "");
 
-
-    char *ccmd = string_makez(cmd);
+    char* ccmd = string_makez(cmd);
     cmd_execute(ccmd, sblk, &sblk_callback);
 
     string_release(cmd);
@@ -3750,27 +3610,27 @@ static ret_t sblk_execute(sblkid_t *sblk) {
 // BLOCK DEVICE SCANNER
 //===============================================================================
 
-static void scan_dir_dev(string *basedir, list_t *devs) {
-    struct dirent *dir = NULL;
+static void blk_dev_scan(string* basedir, list_t* devs) {
+    struct dirent* dir = NULL;
 
-    char *dir_c = string_makez(basedir);
-    DIR *d = opendir(dir_c);
+    char* dir_c = string_makez(basedir);
+    DIR* d = opendir(dir_c);
     zfree(dir_c);
 
     if (d) {
         while ((dir = readdir(d)) != NULL) {
 
-            string *dir_name = NULL;
+            string* dir_name = NULL;
             string_create(&dir_name, dir->d_name);
 
             bool match = string_re_match(dir_name, "sd.*");
 
             if (match) {
 
-                blk_dev_t *dev = zalloc(sizeof(blk_dev_t));
+                blk_dev_t* dev = zalloc(sizeof(blk_dev_t));
 
                 // create sysdir
-                string *sysdir = NULL;
+                string* sysdir = NULL;
                 string_init(&sysdir);
                 string_add(sysdir, basedir);
                 string_add(sysdir, dir_name);
@@ -3781,34 +3641,32 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
                 dev->sysfolder = sysdir;
 
                 // getting stat
-                string *stat_s = NULL;
+                string* stat_s = NULL;
                 string_init(&stat_s);
 
-                string *stat_filename = NULL;
+                string* stat_filename = NULL;
                 string_dub(sysdir, &stat_filename);
                 string_append(stat_filename, "stat");
 
-                char *stat_filename_c = string_makez(stat_filename);
+                char* stat_filename_c = string_makez(stat_filename);
                 file_read_all_s(stat_filename_c, stat_s);
                 string_strip(stat_s);
 
                 zfree(stat_filename_c);
                 string_release(stat_filename);
 
-                list_t *lstat_s = NULL;
+                list_t* lstat_s = NULL;
                 string_split(stat_s, ' ', &lstat_s);
 
                 string_release(stat_s);
 
-                list_iter_t *lstat_it = NULL;
+                list_iter_t* lstat_it = NULL;
                 list_iter_init(lstat_s, &lstat_it);
 
-
-                string *s;
-                size_t stat_n = 0;
-                while ((s = (string *) list_iter_next(lstat_it)))
+                string* s;
+                u64 stat_n = 0;
+                while ((s = (string*)list_iter_next(lstat_it)))
                     string_to_u64(s, &dev->stat[stat_n++]);
-
 
                 list_iter_release(lstat_it);
                 list_release(lstat_s, true);
@@ -3817,11 +3675,11 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
                 // add dev to list
                 list_push(devs, dev);
 
-                string *subdir = NULL;
+                string* subdir = NULL;
                 string_dub(sysdir, &subdir);
 
                 // recursive iterate
-                scan_dir_dev(subdir, devs);
+                blk_dev_scan(subdir, devs);
 
                 string_release(subdir);
             }
@@ -3838,38 +3696,41 @@ static void scan_dir_dev(string *basedir, list_t *devs) {
 //===============================================================================
 
 typedef struct net_dev {
-    string *name;
-    string *sysdir;
-    uint64_t rx_bytes;
-    uint64_t tx_bytes;
+    string* name;
+    string* sysdir;
+    u64 rx_bytes;
+    u64 tx_bytes;
     double tx_speed;
     double rx_speed;
-    string *speed;
-    string *mtu;
+    string* speed;
+    string* mtu;
     double bandwidth_use;
 } net_dev_t;
 
-
-static void net_dev_release_cb(void *p) {
-    net_dev_t *dev = (net_dev_t *) p;
+static void net_dev_release_cb(void* p) {
+    net_dev_t* dev = (net_dev_t*)p;
     if (dev) {
-        if (dev->name) string_release(dev->name);
-        if (dev->sysdir) string_release(dev->sysdir);
-        if (dev->mtu) string_release(dev->mtu);
-        if (dev->speed) string_release(dev->speed);
+        if (dev->name)
+            string_release(dev->name);
+        if (dev->sysdir)
+            string_release(dev->sysdir);
+        if (dev->mtu)
+            string_release(dev->mtu);
+        if (dev->speed)
+            string_release(dev->speed);
         zfree(dev);
     }
 }
 
-static inline string *file_read_subdir(string *subdir, const char *filepath) {
-    string *data = NULL;
+static inline string* file_read_subdir(string* subdir, const char* filepath) {
+    string* data = NULL;
     string_init(&data);
 
-    string *filename = NULL;
+    string* filename = NULL;
     string_dub(subdir, &filename);
     string_append(filename, filepath);
 
-    char *filename_c = string_makez(filename);
+    char* filename_c = string_makez(filename);
     file_read_all_s(filename_c, data);
     string_strip(data);
 
@@ -3879,10 +3740,10 @@ static inline string *file_read_subdir(string *subdir, const char *filepath) {
     return data;
 }
 
-static void net_dev_scan(list_t *devs) {
-    struct dirent *dir = NULL;
+static void net_dev_scan(list_t* devs) {
+    struct dirent* dir = NULL;
 
-    DIR *d = opendir("/sys/class/net/");
+    DIR* d = opendir("/sys/class/net/");
 
     if (d) {
         while ((dir = readdir(d))) {
@@ -3893,13 +3754,13 @@ static void net_dev_scan(list_t *devs) {
             if (strcmp(dir->d_name, "..") == 0)
                 continue;
 
-            string *dir_name = NULL;
+            string* dir_name = NULL;
             string_create(&dir_name, dir->d_name);
 
-            net_dev_t *dev = zalloc(sizeof(net_dev_t));
+            net_dev_t* dev = zalloc(sizeof(net_dev_t));
 
             // create sysdir
-            string *sysdir = NULL;
+            string* sysdir = NULL;
             string_init(&sysdir);
             string_append(sysdir, "/sys/class/net/");
             string_add(sysdir, dir_name);
@@ -3913,8 +3774,8 @@ static void net_dev_scan(list_t *devs) {
 
             dev->mtu = file_read_subdir(sysdir, "mtu");
             dev->speed = file_read_subdir(sysdir, "speed");
-            string *rx_bytes_s = file_read_subdir(sysdir, "statistics/rx_bytes");
-            string *tx_bytes_s = file_read_subdir(sysdir, "statistics/tx_bytes");
+            string* rx_bytes_s = file_read_subdir(sysdir, "statistics/rx_bytes");
+            string* tx_bytes_s = file_read_subdir(sysdir, "statistics/tx_bytes");
 
             string_to_u64(rx_bytes_s, &dev->rx_bytes);
             string_to_u64(tx_bytes_s, &dev->tx_bytes);
@@ -3932,12 +3793,11 @@ static void net_dev_scan(list_t *devs) {
     }
 }
 
+static void net_dev_diff(net_dev_t* a, net_dev_t* b, double sample_rate) {
+    u64 drx = b->rx_bytes - a->rx_bytes;
+    u64 dtx = b->tx_bytes - a->tx_bytes;
 
-static void net_dev_diff(net_dev_t *a, net_dev_t *b, double sample_rate) {
-    uint64_t drx = b->rx_bytes - a->rx_bytes;
-    uint64_t dtx = b->tx_bytes - a->tx_bytes;
-
-    uint64_t ispeed = 0;
+    u64 ispeed = 0;
     string_to_u64(b->speed, &ispeed);
     ispeed /= 8; // to megabytes
     ispeed *= 1024 * 1024; // to bytes
@@ -3947,12 +3807,11 @@ static void net_dev_diff(net_dev_t *a, net_dev_t *b, double sample_rate) {
     else
         string_append(b->speed, " Mbits");
 
-    double pure_rxtx = (double) (drx + dtx) / sample_rate;
-    b->bandwidth_use = pure_rxtx / (double) ispeed;
+    double pure_rxtx = (double)(drx + dtx) / sample_rate;
+    b->bandwidth_use = pure_rxtx / (double)ispeed;
 
     if (isnan(b->bandwidth_use))
         b->bandwidth_use = 0.0;
-
 
     b->rx_speed = drx / sample_rate;
     b->tx_speed = dtx / sample_rate;
@@ -3963,46 +3822,45 @@ static void net_dev_diff(net_dev_t *a, net_dev_t *b, double sample_rate) {
 //===============================================================================
 
 typedef struct cpu_dev {
-    uint64_t user;
-    uint64_t nice;
-    uint64_t system;
-    uint64_t idle;
-    uint64_t iowait;
-    uint64_t irc;
-    uint64_t softirc;
-    uint64_t steal;
-    uint64_t guest;
-    uint64_t guest_nice;
+    u64 user;
+    u64 nice;
+    u64 system;
+    u64 idle;
+    u64 iowait;
+    u64 irc;
+    u64 softirc;
+    u64 steal;
+    u64 guest;
+    u64 guest_nice;
 } cpu_dev_t;
 
-static void cpu_dev_release_cb(void *p) {
+static void cpu_dev_release_cb(void* p) {
     zfree(p);
 }
 
-static void cpu_dev_get(cpu_dev_t **cpu_dev) {
+static void cpu_dev_get(cpu_dev_t** cpu_dev) {
     *cpu_dev = zalloc(sizeof(cpu_dev_t));
-    cpu_dev_t *cpu = *cpu_dev;
-    string *stat_s = NULL;
+    cpu_dev_t* cpu = *cpu_dev;
+    string* stat_s = NULL;
     string_init(&stat_s);
 
     file_read_line("/proc/stat", stat_s);
     string_strip(stat_s);
 
-    list_t *cpu_stats = NULL;
+    list_t* cpu_stats = NULL;
     string_split(stat_s, ' ', &cpu_stats);
     string_release(stat_s);
 
-    list_iter_t *stat_it = NULL;
+    list_iter_t* stat_it = NULL;
     list_iter_init(cpu_stats, &stat_it);
     list_iter_next(stat_it);
 
-    string *stat = NULL;
-    uint64_t istats[10];
-    uint64_t idx = 0;
+    string* stat = NULL;
+    u64 istats[10];
+    u64 idx = 0;
     while ((stat = list_iter_next(stat_it))) {
         string_to_u64(stat, &istats[idx++]);
     }
-
 
     cpu->user = istats[0];
     cpu->nice = istats[1];
@@ -4019,71 +3877,73 @@ static void cpu_dev_get(cpu_dev_t **cpu_dev) {
     list_release(cpu_stats, true);
 }
 
+static double cpu_dev_diff_usage(cpu_dev_t* a, cpu_dev_t* b) {
 
-static double cpu_dev_diff_usage(cpu_dev_t *a, cpu_dev_t *b) {
+    u64 prev_idle = a->idle + a->iowait;
+    u64 idle = b->idle + b->iowait;
 
-    uint64_t prev_idle = a->idle + a->iowait;
-    uint64_t idle = b->idle + b->iowait;
+    u64 prev_non_idle = a->user + a->nice + a->system + a->irc + a->softirc + a->steal;
+    u64 non_idle = b->user + b->nice + b->system + b->irc + b->softirc + b->steal;
 
-    uint64_t prev_non_idle = a->user + a->nice + a->system + a->irc + a->softirc + a->steal;
-    uint64_t non_idle = b->user + b->nice + b->system + b->irc + b->softirc + b->steal;
+    u64 prev_total = prev_idle + prev_non_idle;
+    u64 total = idle + non_idle;
 
-    uint64_t prev_total = prev_idle + prev_non_idle;
-    uint64_t total = idle + non_idle;
+    u64 totald = total - prev_total;
+    u64 idled = idle - prev_idle;
 
-    uint64_t totald = total - prev_total;
-    uint64_t idled = idle - prev_idle;
-
-    double usage = (double) (totald - idled) / (double) totald;
+    double usage = (double)(totald - idled) / (double)totald;
 
     return usage;
 }
 
 typedef struct cpu_info {
-    string *name;
-    string *clock;
-    uint64_t cores;
+    string* name;
+    string* clock;
+    u64 cores;
 } cpu_info_t;
 
-static void cpu_info_release_cb(void *p) {
-    if (!p) return;
+static void cpu_info_release_cb(void* p) {
+    if (!p)
+        return;
 
-    cpu_info_t *cpui = (cpu_info_t *) p;
+    cpu_info_t* cpui = (cpu_info_t*)p;
 
-    if (cpui->name) string_release(cpui->name);
-    if (cpui->clock) string_release(cpui->clock);
+    if (cpui->name)
+        string_release(cpui->name);
+    if (cpui->clock)
+        string_release(cpui->clock);
 
     zfree(cpui);
 }
 
-static void cpu_info_get(cpu_info_t **cpu_info) {
+static void cpu_info_get(cpu_info_t** cpu_info) {
     *cpu_info = zalloc(sizeof(cpu_info_t));
-    cpu_info_t *cpu = *cpu_info;
-    string *info_s = NULL;
+    cpu_info_t* cpu = *cpu_info;
+    string* info_s = NULL;
     string_init(&info_s);
 
     file_read_all_buffered_s("/proc/cpuinfo", info_s);
 
-    list_t *lines = NULL;
+    list_t* lines = NULL;
     string_split(info_s, '\n', &lines);
 
-
-    list_iter_t *lines_it = NULL;
+    list_iter_t* lines_it = NULL;
     list_iter_init(lines, &lines_it);
 
-
-    string *line;
-    uint64_t n_cpu = 0;
+    string* line;
+    u64 n_cpu = 0;
     while ((line = list_iter_next(lines_it))) {
         if (string_starts_with(line, "model name") == ST_OK) {
-            if (n_cpu > 0) continue;
+            if (n_cpu > 0)
+                continue;
             string_crop_tail(line, strlen("model name\t:"));
             string_strip(line);
             string_dub(line, &cpu->name);
         }
 
         if (string_starts_with(line, "cpu MHz") == ST_OK) {
-            if (n_cpu++ > 0) continue;
+            if (n_cpu++ > 0)
+                continue;
             string_crop_tail(line, strlen("cpu MHz\t: "));
             string_strip(line);
             string_dub(line, &cpu->clock);
@@ -4092,7 +3952,6 @@ static void cpu_info_get(cpu_info_t **cpu_info) {
     }
 
     cpu->cores = n_cpu;
-
 
     list_iter_release(lines_it);
     list_release(lines, true);
@@ -4104,29 +3963,26 @@ static void cpu_info_get(cpu_info_t **cpu_info) {
 // MEMORY
 //===============================================================================
 
-typedef struct mem_info
-{
-    uint64_t mem_total; //Total usable memory
-    uint64_t mem_free;  //The amount of physical memory not used by the system
-    uint64_t mem_avail; //An estimate of how much memory is available for starting new applications, without swapping.
-    uint64_t cached;    //Memory in the pagecache (Diskcache and Shared Memory)
-    uint64_t swap_cached;//Memory that is present within main memory, but also in the swapfile. (If memory is needed this area does not need to be swapped out AGAIN because it is already in the swapfile. This saves I/O and increases performance if machine runs short on memory.)
-    uint64_t swap_total;
-    uint64_t swap_free;
-}mem_info_t;
+typedef struct mem_info {
+    u64 mem_total; //Total usable memory
+    u64 mem_free;  //The amount of physical memory not used by the system
+    u64 mem_avail; //An estimate of how much memory is available for starting new applications, without swapping.
+    u64 cached;    //Memory in the pagecache (Diskcache and Shared Memory)
+    u64 swap_cached;//Memory that is present within main memory, but also in the swapfile. (If memory is needed this area does not need to be swapped out AGAIN because it is already in the swapfile. This saves I/O and increases performance if machine runs short on memory.)
+    u64 swap_total;
+    u64 swap_free;
+} mem_info_t;
 
-static void mem_info_release_cb(void* p)
-{
-    if(!p) return;
+static void mem_info_release_cb(void* p) {
+    if (!p)
+        return;
 
     mem_info_t* mem = (mem_info_t*)p;
 
     zfree(mem);
 }
 
-
-static void mem_info_get(mem_info_t** mem_info)
-{
+static void mem_info_get(mem_info_t** mem_info) {
     *mem_info = zalloc(sizeof(mem_info_t));
     mem_info_t* m = *mem_info;
 
@@ -4134,52 +3990,38 @@ static void mem_info_get(mem_info_t** mem_info)
     string_init(&mem_info_s);
     file_read_all_buffered_s("/proc/meminfo", mem_info_s);
 
-
     list_t* pairs = NULL;
 
     string_re_search(mem_info_s, "([a-zA-Z]+):\\s+([0-9]+)", &pairs);
 
     string_release(mem_info_s);
 
-    uint64_t i = 0;
+    u64 i = 0;
 
-    while(i < pairs->size) {
+    while (i < pairs->size) {
         ++i;
         string* key = (string*)list_pop_head(pairs);
         string* val = (string*)list_pop_head(pairs);
 
-        if(string_comparez(key, "MemTotal") == ST_OK)
-        {
+        if (string_comparez(key, "MemTotal") == ST_OK) {
             string_to_u64(val, &m->mem_total);
             m->mem_total *= 1024;
-        }
-        else if(string_comparez(key, "MemFree") == ST_OK)
-        {
+        } else if (string_comparez(key, "MemFree") == ST_OK) {
             string_to_u64(val, &m->mem_free);
             m->mem_free *= 1024;
-        }
-        else if(string_comparez(key, "MemAvailable") == ST_OK)
-        {
+        } else if (string_comparez(key, "MemAvailable") == ST_OK) {
             string_to_u64(val, &m->mem_avail);
             m->mem_avail *= 1024;
-        }
-        else if(string_comparez(key, "Cached") == ST_OK)
-        {
+        } else if (string_comparez(key, "Cached") == ST_OK) {
             string_to_u64(val, &m->cached);
             m->cached *= 1024;
-        }
-        else if(string_comparez(key, "SwapCached") == ST_OK)
-        {
+        } else if (string_comparez(key, "SwapCached") == ST_OK) {
             string_to_u64(val, &m->swap_cached);
             m->swap_cached *= 1024;
-        }
-        else if(string_comparez(key, "SwapTotal") == ST_OK)
-        {
+        } else if (string_comparez(key, "SwapTotal") == ST_OK) {
             string_to_u64(val, &m->swap_total);
             m->swap_total *= 1024;
-        }
-        else if(string_comparez(key, "SwapFree") == ST_OK)
-        {
+        } else if (string_comparez(key, "SwapFree") == ST_OK) {
             string_to_u64(val, &m->swap_free);
             m->swap_free *= 1024;
 
@@ -4216,7 +4058,6 @@ static void mem_info_get(mem_info_t** mem_info)
 #define COLON_MOUNT (75 + COLON_OFFSET)
 #define COLON_MODEL (83 + COLON_OFFSET)
 
-
 #define COLON_NET_NAME (COLON_DEVICE)
 #define COLON_NET_READ (COLON_READ)
 #define COLON_NET_WRITE (COLON_WRITE)
@@ -4224,30 +4065,29 @@ static void mem_info_get(mem_info_t** mem_info)
 #define COLON_NET_SPEED (COLON_USE-3)
 #define COLON_NET_PERC (COLON_SIZE)
 
-
-static list_t *ldevices = NULL;
+static list_t* ldevices = NULL;
 static pthread_mutex_t ldevices_mtx;
 
-static list_t *lnet_devs = NULL;
+static list_t* lnet_devs = NULL;
 static pthread_mutex_t lnet_devs_mtx;
 
-static cpu_info_t *g_cpu_info = NULL;
+static cpu_info_t* g_cpu_info = NULL;
 static pthread_mutex_t cpu_info_mtx;
 
-static mem_info_t *g_mem_info = NULL;
+static mem_info_t* g_mem_info = NULL;
 static pthread_mutex_t mem_info_mtx;
 
 static atomic_bool programm_exit = false;
-static atomic_ulong sample_rate_mul = 100;
-static atomic_ulong cpu_usage = 0;
+static atomic_u64 sample_rate_mul = 100;
+static atomic_u64 cpu_usage = 0;
 
-static uint64_t g_nframe = 0;
+static u64 g_nframe = 0;
 
 static inline double device_get_sample_rate() {
     return DEVICE_BASE_SAMPLE_RATE * atomic_load(&sample_rate_mul);
 }
 
-static void ncruses_print_hr(int row, int col, uint64_t value) {
+static void ncruses_print_hr(int row, int col, u64 value) {
     double size = 0.0;
     int type = 0;
     human_readable_size(value, &size, &type);
@@ -4278,13 +4118,11 @@ void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier)
         char s[64] = {0};
         sprintf(s, "%06.2f Kb/s", r);
 
-        if(r > 0)
-        {
+        if (r > 0) {
             attron(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
             mvaddstr(row, col, s);
             attroff(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
-        } else
-        {
+        } else {
             attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
             mvaddstr(row, col, s);
             attroff(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
@@ -4300,19 +4138,15 @@ void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier)
         sprintf(s, "%06.2f Mb/s", r);
 
         attron(A_BOLD);
-        if(r < green_barier) {
+        if (r < green_barier) {
             attron(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
             mvaddstr(row, col, s);
             attroff(COLOR_PAIR(NCOLOR_PAIR_GREEN_ON_BLACK));
-        }
-        else if(r < (green_barier * 3))
-        {
+        } else if (r < (green_barier * 3)) {
             attron(COLOR_PAIR(NCOLOR_PAIR_YELLOW_ON_BLACK));
             mvaddstr(row, col, s);
             attroff(COLOR_PAIR(NCOLOR_PAIR_YELLOW_ON_BLACK));
-        }
-        else
-        {
+        } else {
             attron(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
             mvaddstr(row, col, s);
             attroff(COLOR_PAIR(NCOLOR_PAIR_RED_ON_BLACK));
@@ -4336,7 +4170,7 @@ void ncruses_print_hr_speed(int row, int col, double bytes, double green_barier)
     }
 }
 
-void *ncurses_keypad(void *p) {
+void* ncurses_keypad(void* p) {
     int c;
     while (1) {
         c = wgetch(stdscr);
@@ -4370,63 +4204,111 @@ void *ncurses_keypad(void *p) {
     return p;
 }
 
-static const char *animation_bug() {
-    static uint64_t frame = 0;
+static const char* animation_bug() {
+    static u64 frame = 0;
     static bool set = false;
     static bool way = true;
-    static const char *movie[48];
+    static const char* movie[48];
     if (!set) {
 
         set = true;
 
-        movie[0] = "\xE2\x98\x83______________________________________________________________________________________________";
-        movie[1] = "__\xE2\x98\x83____________________________________________________________________________________________";
-        movie[2] = "____\xE2\x98\x83__________________________________________________________________________________________";
-        movie[3] = "______\xE2\x98\x83________________________________________________________________________________________";
-        movie[4] = "________\xE2\x98\x83______________________________________________________________________________________";
-        movie[5] = "__________\xE2\x98\x83____________________________________________________________________________________";
-        movie[6] = "____________\xE2\x98\x83__________________________________________________________________________________";
-        movie[7] = "______________\xE2\x98\x83________________________________________________________________________________";
-        movie[8] = "________________\xE2\x98\x83______________________________________________________________________________";
-        movie[9] = "__________________\xE2\x98\x83____________________________________________________________________________";
-        movie[10] = "____________________\xE2\x98\x83__________________________________________________________________________";
-        movie[11] = "______________________\xE2\x98\x83________________________________________________________________________";
-        movie[12] = "________________________\xE2\x98\x83______________________________________________________________________";
-        movie[13] = "__________________________\xE2\x98\x83____________________________________________________________________";
-        movie[14] = "____________________________\xE2\x98\x83__________________________________________________________________";
-        movie[15] = "______________________________\xE2\x98\x83________________________________________________________________";
-        movie[16] = "________________________________\xE2\x98\x83______________________________________________________________";
-        movie[17] = "__________________________________\xE2\x98\x83____________________________________________________________";
-        movie[18] = "____________________________________\xE2\x98\x83__________________________________________________________";
-        movie[19] = "______________________________________\xE2\x98\x83________________________________________________________";
-        movie[20] = "________________________________________\xE2\x98\x83______________________________________________________";
-        movie[21] = "__________________________________________\xE2\x98\x83____________________________________________________";
-        movie[22] = "____________________________________________\xE2\x98\x83__________________________________________________";
-        movie[23] = "______________________________________________\xE2\x98\x83________________________________________________";
-        movie[24] = "________________________________________________\xE2\x98\x83______________________________________________";
-        movie[25] = "__________________________________________________\xE2\x98\x83____________________________________________";
-        movie[26] = "____________________________________________________\xE2\x98\x83__________________________________________";
-        movie[27] = "______________________________________________________\xE2\x98\x83________________________________________";
-        movie[28] = "________________________________________________________\xE2\x98\x83______________________________________";
-        movie[29] = "__________________________________________________________\xE2\x98\x83____________________________________";
-        movie[30] = "____________________________________________________________\xE2\x98\x83__________________________________";
-        movie[31] = "______________________________________________________________\xE2\x98\x83________________________________";
-        movie[32] = "________________________________________________________________\xE2\x98\x83______________________________";
-        movie[33] = "__________________________________________________________________\xE2\x98\x83____________________________";
-        movie[34] = "____________________________________________________________________\xE2\x98\x83__________________________";
-        movie[35] = "______________________________________________________________________\xE2\x98\x83________________________";
-        movie[36] = "________________________________________________________________________\xE2\x98\x83______________________";
-        movie[37] = "__________________________________________________________________________\xE2\x98\x83____________________";
-        movie[38] = "____________________________________________________________________________\xE2\x98\x83__________________";
-        movie[39] = "______________________________________________________________________________\xE2\x98\x83________________";
-        movie[40] = "________________________________________________________________________________\xE2\x98\x83______________";
-        movie[41] = "__________________________________________________________________________________\xE2\x98\x83____________";
-        movie[42] = "____________________________________________________________________________________\xE2\x98\x83__________";
-        movie[43] = "______________________________________________________________________________________\xE2\x98\x83________";
-        movie[44] = "________________________________________________________________________________________\xE2\x98\x83______";
-        movie[45] = "__________________________________________________________________________________________\xE2\x98\x83____";
-        movie[46] = "____________________________________________________________________________________________\xE2\x98\x83__";
-        movie[47] = "______________________________________________________________________________________________\xE2\x98\x83";
+        movie[0] =
+                "\xE2\x98\x83______________________________________________________________________________________________";
+        movie[1] =
+                "__\xE2\x98\x83____________________________________________________________________________________________";
+        movie[2] =
+                "____\xE2\x98\x83__________________________________________________________________________________________";
+        movie[3] =
+                "______\xE2\x98\x83________________________________________________________________________________________";
+        movie[4] =
+                "________\xE2\x98\x83______________________________________________________________________________________";
+        movie[5] =
+                "__________\xE2\x98\x83____________________________________________________________________________________";
+        movie[6] =
+                "____________\xE2\x98\x83__________________________________________________________________________________";
+        movie[7] =
+                "______________\xE2\x98\x83________________________________________________________________________________";
+        movie[8] =
+                "________________\xE2\x98\x83______________________________________________________________________________";
+        movie[9] =
+                "__________________\xE2\x98\x83____________________________________________________________________________";
+        movie[10] =
+                "____________________\xE2\x98\x83__________________________________________________________________________";
+        movie[11] =
+                "______________________\xE2\x98\x83________________________________________________________________________";
+        movie[12] =
+                "________________________\xE2\x98\x83______________________________________________________________________";
+        movie[13] =
+                "__________________________\xE2\x98\x83____________________________________________________________________";
+        movie[14] =
+                "____________________________\xE2\x98\x83__________________________________________________________________";
+        movie[15] =
+                "______________________________\xE2\x98\x83________________________________________________________________";
+        movie[16] =
+                "________________________________\xE2\x98\x83______________________________________________________________";
+        movie[17] =
+                "__________________________________\xE2\x98\x83____________________________________________________________";
+        movie[18] =
+                "____________________________________\xE2\x98\x83__________________________________________________________";
+        movie[19] =
+                "______________________________________\xE2\x98\x83________________________________________________________";
+        movie[20] =
+                "________________________________________\xE2\x98\x83______________________________________________________";
+        movie[21] =
+                "__________________________________________\xE2\x98\x83____________________________________________________";
+        movie[22] =
+                "____________________________________________\xE2\x98\x83__________________________________________________";
+        movie[23] =
+                "______________________________________________\xE2\x98\x83________________________________________________";
+        movie[24] =
+                "________________________________________________\xE2\x98\x83______________________________________________";
+        movie[25] =
+                "__________________________________________________\xE2\x98\x83____________________________________________";
+        movie[26] =
+                "____________________________________________________\xE2\x98\x83__________________________________________";
+        movie[27] =
+                "______________________________________________________\xE2\x98\x83________________________________________";
+        movie[28] =
+                "________________________________________________________\xE2\x98\x83______________________________________";
+        movie[29] =
+                "__________________________________________________________\xE2\x98\x83____________________________________";
+        movie[30] =
+                "____________________________________________________________\xE2\x98\x83__________________________________";
+        movie[31] =
+                "______________________________________________________________\xE2\x98\x83________________________________";
+        movie[32] =
+                "________________________________________________________________\xE2\x98\x83______________________________";
+        movie[33] =
+                "__________________________________________________________________\xE2\x98\x83____________________________";
+        movie[34] =
+                "____________________________________________________________________\xE2\x98\x83__________________________";
+        movie[35] =
+                "______________________________________________________________________\xE2\x98\x83________________________";
+        movie[36] =
+                "________________________________________________________________________\xE2\x98\x83______________________";
+        movie[37] =
+                "__________________________________________________________________________\xE2\x98\x83____________________";
+        movie[38] =
+                "____________________________________________________________________________\xE2\x98\x83__________________";
+        movie[39] =
+                "______________________________________________________________________________\xE2\x98\x83________________";
+        movie[40] =
+                "________________________________________________________________________________\xE2\x98\x83______________";
+        movie[41] =
+                "__________________________________________________________________________________\xE2\x98\x83____________";
+        movie[42] =
+                "____________________________________________________________________________________\xE2\x98\x83__________";
+        movie[43] =
+                "______________________________________________________________________________________\xE2\x98\x83________";
+        movie[44] =
+                "________________________________________________________________________________________\xE2\x98\x83______";
+        movie[45] =
+                "__________________________________________________________________________________________\xE2\x98\x83____";
+        movie[46] =
+                "____________________________________________________________________________________________\xE2\x98\x83__";
+        movie[47] =
+                "______________________________________________________________________________________________\xE2\x98\x83";
 
     }
 
@@ -4436,7 +4318,6 @@ static const char *animation_bug() {
     if (frame == 0)
         way = true;
 
-
     if (way)
         return movie[frame++];
     else
@@ -4444,15 +4325,14 @@ static const char *animation_bug() {
 }
 
 //@progress - 0-50
-static void ncurses_bar_render(int row, int col, int64_t progress)
-{
-    const char *lit = "❯";
+static void ncurses_bar_render(int row, int col, int64_t progress) {
+    const char* lit = "❯";
 
-    string *gs = NULL;
+    string* gs = NULL;
     string_init(&gs);
-    string *ys = NULL;
+    string* ys = NULL;
     string_init(&ys);
-    string *rs = NULL;
+    string* rs = NULL;
     string_init(&rs);
 
     for (int64_t i = 0; i < MIN(progress, 30); ++i) {
@@ -4467,24 +4347,24 @@ static void ncurses_bar_render(int row, int col, int64_t progress)
         string_append(rs, lit);
     }
 
-    char *gbar = string_makez(gs);
+    char* gbar = string_makez(gs);
     string_release(gs);
 
-    char *ybar = string_makez(ys);
+    char* ybar = string_makez(ys);
     string_release(ys);
 
-    char *rbar = string_makez(rs);
+    char* rbar = string_makez(rs);
     string_release(rs);
 
     mvaddstr(row, col, "[");
     attron(COLOR_PAIR(2));
-    mvaddstr(row, col+1, gbar);
+    mvaddstr(row, col + 1, gbar);
     attroff(COLOR_PAIR(2));
     attron(COLOR_PAIR(4));
-    mvaddstr(row, col+31, ybar);
+    mvaddstr(row, col + 31, ybar);
     attroff(COLOR_PAIR(4));
     attron(COLOR_PAIR(5));
-    mvaddstr(row, col+46, rbar);
+    mvaddstr(row, col + 46, rbar);
     attroff(COLOR_PAIR(5));
 
     mvaddstr(row, col + 51, "]");
@@ -4497,7 +4377,7 @@ static void ncurses_bar_render(int row, int col, int64_t progress)
 static void ncurses_cpu_bar_render(int row, int col) {
 
     ulong cpus = atomic_load(&cpu_usage);
-    int64_t cu = (int64_t) cpus / 2;
+    int64_t cu = (int64_t)cpus / 2;
 
     ncurses_bar_render(row, col, cu);
 
@@ -4507,8 +4387,7 @@ static void ncurses_cpu_bar_render(int row, int col) {
 
 }
 
-
-void ncurses_addstrf(int row, int col, const char *fmt, ...) {
+void ncurses_addstrf(int row, int col, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
 
@@ -4546,13 +4425,12 @@ void ncurses_window() {
     init_pair(NCOLOR_PAIR_YELLOW_ON_BLACK, COLOR_YELLOW, COLOR_BLACK);
     init_pair(NCOLOR_PAIR_RED_ON_BLACK, COLOR_RED, COLOR_BLACK);
 
-
     double frame_time = 1.0;
     while (!atomic_load(&programm_exit)) {
         struct timespec tm_start = timer_start();
 
-        double frame_rate = 1.0/device_get_sample_rate();
-        uint64_t scr_upd = (uint64_t)(NANOSEC_IN_SEC / frame_rate);
+        double frame_rate = 1.0 / device_get_sample_rate();
+        u64 scr_upd = (u64)(NANOSEC_IN_SEC / frame_rate);
         int row = 1;
         ++g_nframe;
 
@@ -4563,7 +4441,6 @@ void ncurses_window() {
 
         mvaddstr(row++, 1, animation_bug());
         row++;
-
 
         char hwversion_s[128] = {0};
         sprintf(hwversion_s, "HWMonitor %d.%d%d", HW_VERSION_MAJOR, HW_VERSION_MINOR_A, HW_VERSION_MINOR_B);
@@ -4587,8 +4464,8 @@ void ncurses_window() {
 
         if (g_cpu_info) {
 
-            char *cpu_name = string_makez(g_cpu_info->name);
-            char *cpu_clock = string_makez(g_cpu_info->clock);
+            char* cpu_name = string_makez(g_cpu_info->name);
+            char* cpu_clock = string_makez(g_cpu_info->clock);
 
             ncurses_addstrf(row++, 1, "%dx %s (%s MHz)", g_cpu_info->cores, cpu_name, cpu_clock);
 
@@ -4598,35 +4475,32 @@ void ncurses_window() {
 
         pthread_mutex_unlock(&cpu_info_mtx);
 
-
         row++;
 
         attroff(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
         ncurses_cpu_bar_render(row++, 1);
         attron(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
 
-
-
         pthread_mutex_lock(&mem_info_mtx);
 
         if (g_mem_info) {
 
-            double mem_load_perc = 100.0 - g_mem_info->mem_free/(double)g_mem_info->mem_total * 100.0;
-            int64_t mem_load = (int64_t)(mem_load_perc/2.0);
+            double mem_load_perc = 100.0 - g_mem_info->mem_free / (double)g_mem_info->mem_total * 100.0;
+            int64_t mem_load = (int64_t)(mem_load_perc / 2.0);
 
             ncurses_bar_render(row, 1, mem_load);
-            uint64_t mem_total = g_mem_info->mem_total/1024/1024;
-            uint64_t mem_used = (g_mem_info->mem_total - g_mem_info->mem_free)/1024/1024;
+            u64 mem_total = g_mem_info->mem_total / 1024 / 1024;
+            u64 mem_used = (g_mem_info->mem_total - g_mem_info->mem_free) / 1024 / 1024;
             char load_s[64];
             sprintf(load_s, "%02lu%% Memory [%lu/%lu Mb]", (ulong)mem_load_perc, mem_used, mem_total);
             mvaddstr(row++, 54, load_s);
 
-            double swap_load_perc = 100.0 - g_mem_info->swap_free/(double)g_mem_info->swap_total * 100.0;
-            int64_t swap_load = (int64_t)(swap_load_perc/2.0);
+            double swap_load_perc = 100.0 - g_mem_info->swap_free / (double)g_mem_info->swap_total * 100.0;
+            int64_t swap_load = (int64_t)(swap_load_perc / 2.0);
 
             ncurses_bar_render(row, 1, swap_load);
-            uint64_t swap_total = g_mem_info->swap_total/1024/1024;
-            uint64_t swap_used = (g_mem_info->swap_total - g_mem_info->swap_free)/1024/1024;
+            u64 swap_total = g_mem_info->swap_total / 1024 / 1024;
+            u64 swap_used = (g_mem_info->swap_total - g_mem_info->swap_free) / 1024 / 1024;
             char sload_s[64];
             sprintf(sload_s, "%02lu%% Swap   [%lu/%lu Mb]", (ulong)swap_load_perc, swap_used, swap_total);
             mvaddstr(row++, 54, sload_s);
@@ -4650,25 +4524,23 @@ void ncurses_window() {
         mvaddstr(row++, COLON_MODEL, "Model");
         attroff(COLOR_PAIR(NCOLOR_PAIR_WHITE_ON_BLACK));
 
-
         attroff(A_BOLD);
         pthread_mutex_lock(&ldevices_mtx);
 
         if (ldevices) {
 
-
-            list_iter_t *it = NULL;
+            list_iter_t* it = NULL;
             list_iter_init(ldevices, &it);
-            blk_dev_t *dev = NULL;
+            blk_dev_t* dev = NULL;
             while ((dev = list_iter_next(it))) {
                 attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
 
-                char *name = string_makez(dev->name);
-                char *fs = string_makez(dev->fs);
-                char *model = string_makez(dev->model);
-                char *mount = string_makez(dev->mount);
+                char* name = string_makez(dev->name);
+                char* fs = string_makez(dev->fs);
+                char* model = string_makez(dev->model);
+                char* mount = string_makez(dev->mount);
 
-                char *shed = string_makez(dev->shed);
+                char* shed = string_makez(dev->shed);
 
                 char perc[32] = {0};
                 sprintf(perc, "%04.1f%%", dev->perc);
@@ -4687,7 +4559,6 @@ void ncurses_window() {
                 mvaddstr(row, COLON_SCHED, shed);
                 mvaddstr(row, COLON_MOUNT, mount);
                 mvaddstr(row++, COLON_MODEL, model);
-
 
                 zfree(shed);
                 zfree(mount);
@@ -4722,14 +4593,13 @@ void ncurses_window() {
 
             list_iter_t* it = NULL;
             list_iter_init(lnet_devs, &it);
-            net_dev_t *ndev = NULL;
+            net_dev_t* ndev = NULL;
             while ((ndev = list_iter_next(it))) {
                 attron(COLOR_PAIR(NCOLOR_PAIR_CYAN_ON_BLACK));
 
-                char *name = string_makez(ndev->name);
-                char *mtu = string_makez(ndev->mtu);
-                char *speed = string_makez(ndev->speed);
-
+                char* name = string_makez(ndev->name);
+                char* mtu = string_makez(ndev->mtu);
+                char* speed = string_makez(ndev->speed);
 
                 char perc[64] = {0};
                 sprintf(perc, "%04.1f%%", ndev->bandwidth_use);
@@ -4760,16 +4630,14 @@ void ncurses_window() {
 
         refresh(); // Print to the screen
 #ifndef HW_NO_SLEEP
-        nsleep((uint64_t)scr_upd);
+        nsleep((u64)scr_upd);
 #endif
 
         frame_time = timer_end_ms(tm_start);
     }
 
-
     endwin();
 }
-
 
 static void check_style_defines() {
 #ifdef _POSIX_SOURCE
@@ -4777,7 +4645,7 @@ static void check_style_defines() {
 #endif
 
 #ifdef _POSIX_C_SOURCE
-    LOG_TRACE("_POSIX_C_SOURCE defined: %ldL", (long) _POSIX_C_SOURCE);
+    LOG_TRACE("_POSIX_C_SOURCE defined: %ldL", (long)_POSIX_C_SOURCE);
 #endif
 
 #ifdef _ISOC99_SOURCE
@@ -4837,18 +4705,18 @@ static void check_style_defines() {
 // BLOCK DEVICE SAMPLING
 //===============================================================================
 
-static void devices_get(list_t **devs) {
-    string *basedir = NULL;
+static void blkdev_get(list_t** devs) {
+    string* basedir = NULL;
 
     list_init(devs, &blk_dev_release_cb);
 
     string_create(&basedir, "/sys/block/");
 
-    scan_dir_dev(basedir, *devs);
+    blk_dev_scan(basedir, *devs);
 
     string_release(basedir);
 
-    df_t *df;
+    df_t* df;
     df_init(*devs, &df);
     df_execute(df);
     zfree(df);
@@ -4858,21 +4726,21 @@ static void devices_get(list_t **devs) {
     sblk_execute(&blk);
 
 #ifndef NDEBUG
-    list_iter_t *list_it = NULL;
+    list_iter_t* list_it = NULL;
     list_iter_init(*devs, &list_it);
 
-    blk_dev_t *dev;
-    while ((dev = (blk_dev_t *) list_iter_next(list_it))) {
-        char *name = string_makez(dev->name);
-        char *syspath = string_makez(dev->sysfolder);
-        char *fs = string_makez(dev->fs);
-        char *model = string_makez(dev->model);
-        char *mount = string_makez(dev->mount);
-        char *uuid = string_makez(dev->uuid);
-        char *label = string_makez(dev->label);
+    blk_dev_t* dev;
+    while ((dev = (blk_dev_t*)list_iter_next(list_it))) {
+        char* name = string_makez(dev->name);
+        char* syspath = string_makez(dev->sysfolder);
+        char* fs = string_makez(dev->fs);
+        char* model = string_makez(dev->model);
+        char* mount = string_makez(dev->mount);
+        char* uuid = string_makez(dev->uuid);
+        char* label = string_makez(dev->label);
         LOG_DEBUG("[0x%p][name=%s][syspath=%s][size=%lu][used=%lu][avail=%lu][use=%lu][perc=%lf][fs=%s][model=%s]"
                           "[mount=%s][uuid=%s][label=%s]\n",
-                  (void *) dev, name, syspath,
+                  (void*)dev, name, syspath,
                   dev->size, dev->used, dev->avail, dev->use, dev->perc,
                   fs, model, mount, uuid, label
 
@@ -4891,35 +4759,31 @@ static void devices_get(list_t **devs) {
 #endif
 }
 
+typedef void(* sampled_device_cb)(list_t*);
 
-typedef void(*sampled_device_cb)(list_t *);
+static void blkdev_sample(double sample_size_sec, sampled_device_cb cb) {
+    list_t* devs_a = NULL;
+    list_t* devs_b = NULL;
 
-
-static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
-    list_t *devs_a = NULL;
-    list_t *devs_b = NULL;
-
-    devices_get(&devs_a);
+    blkdev_get(&devs_a);
 
 #ifndef HW_NO_SLEEP
     nsleepd(sample_size_sec);
 #endif
 
+    blkdev_get(&devs_b);
 
-    devices_get(&devs_b);
-
-
-    list_iter_t *it = NULL;
+    list_iter_t* it = NULL;
     list_iter_init(devs_a, &it);
 
-    blk_dev_t *dev_a;
-    blk_dev_t *dev_b;
+    blk_dev_t* dev_a;
+    blk_dev_t* dev_b;
     while ((dev_a = list_iter_next(it))) {
-        list_iter_t *it2 = NULL;
+        list_iter_t* it2 = NULL;
         list_iter_init(devs_b, &it2);
 
         while ((dev_b = list_iter_next(it2))) {
-            if(string_compare(dev_a->name, dev_b->name) == ST_OK) {
+            if (string_compare(dev_a->name, dev_b->name) == ST_OK) {
                 blk_dev_diff(dev_a, dev_b, sample_size_sec);
                 break;
             }
@@ -4933,21 +4797,22 @@ static void devices_sample(double sample_size_sec, sampled_device_cb cb) {
 
     list_release(devs_a, true);
 
-    if (cb) cb(devs_b);
+    if (cb)
+        cb(devs_b);
 
     pthread_mutex_lock(&ldevices_mtx);
-    if (ldevices) list_release(ldevices, true);
+    if (ldevices)
+        list_release(ldevices, true);
     ldevices = devs_b;
     pthread_mutex_unlock(&ldevices_mtx);
 
 }
 
-
-void *start_device_sample(void *p) {
+void* start_blkdev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
-        devices_sample(sample_rate, NULL);
+        blkdev_sample(sample_rate, NULL);
 #else
         devices_sample(sample_rate, NULL);
 #endif
@@ -4960,19 +4825,17 @@ void *start_device_sample(void *p) {
 // NET DEVICE SAMPLING
 //===============================================================================
 
-static void net_dev_get(list_t **devs) {
+static void net_dev_get(list_t** devs) {
     list_init(devs, &net_dev_release_cb);
 
     net_dev_scan(*devs);
 }
 
-
-typedef void(*sampled_device_cb)(list_t *);
-
+typedef void(* sampled_device_cb)(list_t*);
 
 static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
-    list_t *devs_a = NULL;
-    list_t *devs_b = NULL;
+    list_t* devs_a = NULL;
+    list_t* devs_b = NULL;
 
     net_dev_get(&devs_a);
 
@@ -4980,21 +4843,19 @@ static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
     nsleepd(sample_size_sec);
 #endif
 
-
     net_dev_get(&devs_b);
 
-
-    list_iter_t *it = NULL;
+    list_iter_t* it = NULL;
     list_iter_init(devs_a, &it);
 
-    net_dev_t *dev_a;
-    net_dev_t *dev_b;
+    net_dev_t* dev_a;
+    net_dev_t* dev_b;
     while ((dev_a = list_iter_next(it))) {
-        list_iter_t *it2 = NULL;
+        list_iter_t* it2 = NULL;
         list_iter_init(devs_b, &it2);
 
         while ((dev_b = list_iter_next(it2))) {
-            if(string_compare(dev_a->name, dev_b->name) == ST_OK) {
+            if (string_compare(dev_a->name, dev_b->name) == ST_OK) {
                 net_dev_diff(dev_a, dev_b, sample_size_sec);
                 break;
             }
@@ -5008,16 +4869,18 @@ static void net_dev_sample(double sample_size_sec, sampled_device_cb cb) {
 
     list_release(devs_a, true);
 
-    if (cb) cb(devs_b);
+    if (cb)
+        cb(devs_b);
 
     pthread_mutex_lock(&lnet_devs_mtx);
-    if (lnet_devs) list_release(lnet_devs, true);
+    if (lnet_devs)
+        list_release(lnet_devs, true);
     lnet_devs = devs_b;
     pthread_mutex_unlock(&lnet_devs_mtx);
 
 }
 
-void *start_net_dev_sample(void *p) {
+void* start_net_dev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -5034,8 +4897,8 @@ void *start_net_dev_sample(void *p) {
 // CPU PROC SAMPLING
 //===============================================================================
 static void cpu_dev_sample(double sample_size_sec) {
-    cpu_dev_t *cpu_a = NULL;
-    cpu_dev_t *cpu_b = NULL;
+    cpu_dev_t* cpu_a = NULL;
+    cpu_dev_t* cpu_b = NULL;
 
     pthread_mutex_lock(&cpu_info_mtx);
 
@@ -5056,16 +4919,15 @@ static void cpu_dev_sample(double sample_size_sec) {
 
     cpu_dev_get(&cpu_b);
 
-
     double usage = cpu_dev_diff_usage(cpu_a, cpu_b) * 100.0;
 
-    atomic_store(&cpu_usage, (ulong) usage);
+    atomic_store(&cpu_usage, (ulong)usage);
 
     cpu_dev_release_cb(cpu_a);
     cpu_dev_release_cb(cpu_b);
 }
 
-void *start_cpu_dev_sample(void *p) {
+void* start_cpu_dev_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -5094,13 +4956,12 @@ static void mem_info_sample(double sample_size_sec) {
 
     pthread_mutex_unlock(&mem_info_mtx);
 
-
 #ifndef HW_NO_SLEEP
     nsleepd(sample_size_sec);
 #endif
 }
 
-void *start_mem_info_sample(void *p) {
+void* start_mem_info_sample(void* p) {
     while (!atomic_load(&programm_exit)) {
         double sample_rate = device_get_sample_rate();
 #ifndef NDEBUG
@@ -5122,9 +4983,11 @@ void sig_handler(int signo) {
         atomic_store(&programm_exit, true);
     }
 
-    if(signo == SIGUSR1)
-    {
+    if (signo == SIGUSR1) {
+#ifndef NDEBUG
         alloc_dump_summary();
+        ht_hist_dump_csv(g_alloc_ht, "alloc_ht_hist.csv");
+#endif
     }
 }
 
@@ -5166,19 +5029,18 @@ int main() {
     pthread_mutex_init(&cpu_info_mtx, NULL);
     pthread_mutex_init(&mem_info_mtx, NULL);
 
-    pthread_t t;
+    pthread_t blk_dev_thr;
 
-    pthread_create(&t, NULL, &start_device_sample, NULL);
-    pthread_setname_np(t, "device_sample");
+    pthread_create(&blk_dev_thr, NULL, &start_blkdev_sample, NULL);
+    pthread_setname_np(blk_dev_thr, "blkdev_sample");
 
+    pthread_t net_dev_thr;
+    pthread_create(&net_dev_thr, NULL, &start_net_dev_sample, NULL);
+    pthread_setname_np(net_dev_thr, "netdev_sample");
 
-    pthread_t net_dev_t;
-    pthread_create(&net_dev_t, NULL, &start_net_dev_sample, NULL);
-    pthread_setname_np(net_dev_t, "netdev_sample");
-
-    pthread_t cpu_dev_t;
-    pthread_create(&cpu_dev_t, NULL, &start_cpu_dev_sample, NULL);
-    pthread_setname_np(cpu_dev_t, "cpudev_sample");
+    pthread_t cpu_dev_thr;
+    pthread_create(&cpu_dev_thr, NULL, &start_cpu_dev_sample, NULL);
+    pthread_setname_np(cpu_dev_thr, "cpudev_sample");
 
     pthread_t mem_info_thr;
     pthread_create(&mem_info_thr, NULL, &start_mem_info_sample, NULL);
@@ -5190,9 +5052,9 @@ int main() {
 
     ncurses_window();
 
-    pthread_join(t, NULL);
-    pthread_join(net_dev_t, NULL);
-    pthread_join(cpu_dev_t, NULL);
+    pthread_join(blk_dev_thr, NULL);
+    pthread_join(net_dev_thr, NULL);
+    pthread_join(cpu_dev_thr, NULL);
     pthread_join(mem_info_thr, NULL);
 
     pthread_mutex_destroy(&ldevices_mtx);
